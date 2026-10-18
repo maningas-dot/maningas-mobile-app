@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:ph_address_finder/ph_address_finder.dart';
 import 'appointment_scheduler.dart';
 import 'app_notifications.dart';
 import 'app_settings.dart';
@@ -13,6 +15,9 @@ import 'try_on_webview_screen.dart';
 import 'verification_screen.dart';
 import 'terms_and_conditions.dart';
 import 'transaction_history_screen.dart';
+import 'philippine_address_helper.dart';
+import 'zip_code_lookup.dart';
+import 'forgot_password_screen.dart';
 
 class Main {
   static const String baseUrl = 'https://gonzalesvisionclinic.onrender.com';
@@ -22,6 +27,104 @@ const Map<String, String> jsonHeaders = {
   'Content-Type': 'application/json',
   'Accept': 'application/json',
 };
+
+Map<String, dynamic> structuredAddressFieldsFromLoginResponse(
+  Map<String, dynamic> data,
+) {
+  const keys = [
+    'address_unit',
+    'address_street',
+    'address_barangay',
+    'address_city_municipality',
+    'address_province',
+    'address_zip_code',
+  ];
+  return {
+    for (final key in keys)
+      if (data.containsKey(key)) key: data[key],
+  };
+}
+
+Map<String, dynamic> nameFieldsFromLoginResponse(Map<String, dynamic> data) {
+  final fields = <String, dynamic>{'first_name': '', 'last_name': ''};
+  for (final key in const ['first_name', 'middle_name', 'last_name']) {
+    if (data.containsKey(key)) {
+      fields[key] = data[key];
+    }
+  }
+
+  final fullName = data['name']?.toString().trim() ?? '';
+  if (fullName.isNotEmpty) {
+    final parts = fullName.split(RegExp(r'\s+'));
+    if (!data.containsKey('first_name')) {
+      fields['first_name'] = parts.first;
+    }
+    if (!data.containsKey('last_name')) {
+      fields['last_name'] = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+    }
+  }
+  return fields;
+}
+
+Map<String, dynamic> mergeProfileRefreshData(
+  Map<String, dynamic> currentProfile,
+  Map<String, dynamic> profileResponse,
+) {
+  return {...currentProfile, ...profileResponse};
+}
+
+Map<String, dynamic> patientProfileFromResponse(dynamic response) {
+  if (response is! Map) {
+    throw const FormatException('Invalid patient profile response.');
+  }
+
+  Map<String, dynamic> patientMap;
+  final wrappedPatient = response['patient'];
+  final wrappedData = response['data'];
+  if (wrappedPatient is Map) {
+    patientMap = Map<String, dynamic>.from(wrappedPatient);
+  } else if (wrappedData is Map) {
+    patientMap = Map<String, dynamic>.from(wrappedData);
+  } else {
+    patientMap = Map<String, dynamic>.from(response);
+  }
+
+  String? usableValue(dynamic value) {
+    if (value == null) return null;
+    final text = value.toString();
+    return text.trim().isEmpty ? null : text;
+  }
+
+  final nestedAddressMaps = [
+    patientMap['address'],
+    patientMap['patient_address'],
+  ].whereType<Map>();
+  const nestedKeys = {
+    'address_unit': 'unit',
+    'address_street': 'street',
+    'address_barangay': 'barangay',
+    'address_city_municipality': 'city_municipality',
+    'address_province': 'province',
+    'address_zip_code': 'zip_code',
+  };
+  final mappedPatient = Map<String, dynamic>.from(patientMap);
+  for (final entry in nestedKeys.entries) {
+    var value = usableValue(patientMap[entry.key]);
+    if (value == null) {
+      for (final nestedAddress in nestedAddressMaps) {
+        value =
+            usableValue(nestedAddress[entry.key]) ??
+            usableValue(nestedAddress[entry.value]);
+        if (value != null) break;
+      }
+    }
+    mappedPatient[entry.key] = value;
+  }
+  if (mappedPatient['address'] is Map) {
+    mappedPatient['address'] = '';
+  }
+  return mappedPatient;
+}
 
 const Color primaryBlue = Color(0xFF0F76FF);
 const Color surfaceWhite = Color(0xFFFFFFFF);
@@ -87,6 +190,16 @@ String resolveFrameImageUrl(String? rawUrl) {
   }
 
   return '$apiBaseUrl/${cleaned.replaceFirst(RegExp(r'^/+'), '')}';
+}
+
+bool addressSelectionMatchesRequest({
+  required String requestedProvinceCode,
+  required String requestedMunicipalityCode,
+  required String? selectedProvinceCode,
+  required String? selectedMunicipalityCode,
+}) {
+  return requestedProvinceCode == selectedProvinceCode &&
+      requestedMunicipalityCode == selectedMunicipalityCode;
 }
 
 void main() {
@@ -204,152 +317,17 @@ class _AuthScreenState extends State<AuthScreen> {
 
   final _ageController = TextEditingController();
 
-  final List<String> _provinces = [
-    'Bulacan',
-    'Cavite',
-    'Laguna',
-    'Metro Manila',
-    'Quezon',
-  ];
+  List<Map<String, dynamic>> _provinces = const [];
+  List<Map<String, dynamic>> _cities = const [];
+  List<Map<String, dynamic>> _barangays = const [];
 
-  final Map<String, List<String>> _citiesByProvince = {
-    'Bulacan': [
-      'San Jose Del Monte',
-      'Marilao',
-      'Meycauayan',
-      'Norzagaray',
-      'Santa Maria',
-    ],
-    'Cavite': ['General Trias', 'Dasmariñas', 'Imus', 'Tagaytay'],
-    'Laguna': ['Santa Rosa', 'Biñan', 'San Pedro', 'Calamba'],
-    'Metro Manila': ['Quezon City', 'Manila', 'Pasig', 'Makati'],
-    'Quezon': ['Lucena', 'Tayabas', 'Sariaya', 'Candelaria'],
-  };
-
-  final Map<String, List<String>> _barangaysByCity = {
-    'San Jose Del Monte': ['Bignay', 'Fatima', 'Gayan', 'Lourdes', 'Poblacion'],
-    'Marilao': [
-      'Abangan Norte',
-      'Abangan Sur',
-      'Ibayo',
-      'Lambakin',
-      'Lias',
-      'Loma de Gato',
-      'Nagbalon',
-      'Patubig',
-      'Poblacion I',
-      'Poblacion II',
-      'Prenza I',
-      'Prenza II',
-      'Santa Rosa I',
-      'Santa Rosa II',
-      'Saog',
-      'Tabing Ilog',
-    ],
-    'Meycauayan': [
-      'Abangan Norte',
-      'Abangan Sur',
-      'Ibayo',
-      'Lambakin',
-      'Lias',
-      'Loma de Gato',
-      'Nagbalon',
-      'Patubig',
-      'Poblacion I',
-      'Poblacion II',
-      'Prenza I',
-      'Prenza II',
-      'Santa Rosa I',
-      'Santa Rosa II',
-      'Saog',
-      'Tabing Ilog',
-    ],
-    'Norzagaray': [
-      'Bangkal',
-      'Baraka',
-      'Bigte',
-      'Bitungol',
-      'Friendship Village Resources',
-      'Matictic',
-      'Minuyan',
-      'Partida',
-      'Pinagtulayan',
-      'Poblacion',
-      'San Lorenzo',
-      'San Mateo',
-      'Tigbe',
-    ],
-    'Santa Maria': [
-      'Bagbaguin',
-      'Balasing',
-      'Buenavista',
-      'Bulac',
-      'Camangyanan',
-      'Catmon',
-      'Cay Pombo',
-      'Caysio',
-      'Guyong',
-      'Lalakhan',
-      'Mag-asawang Sapa',
-      'Mahabang Parang',
-      'Manggahan',
-      'Parada',
-      'Poblacion',
-      'Pulong Buhangin',
-      'San Gabriel',
-      'San Jose Patag',
-      'San Vicente',
-      'Santa Clara',
-      'Santa Cruz',
-      'Silangan',
-      'Tabing Bakod',
-      'Tumana',
-    ],
-    'General Trias': ['San Francisco', 'Pasong Kawayan', 'Panghulo', 'Viga'],
-    'Dasmariñas': ['Burol', 'Salawag', 'Langkaan', 'Paliparan'],
-    'Imus': ['Anabu', 'Bayan Luma', 'Poblacion', 'Toclong'],
-    'Tagaytay': ['Calabuso', 'Sungay', 'Mendez Crossing', 'Patutong'],
-    'Santa Rosa': ['Balibago', 'Malitlit', 'Pulong Santa Cruz', 'Tagapo'],
-    'Biñan': ['San Antonio', 'Sto. Niño', 'Mabolo', 'Malaban'],
-    'San Pedro': ['Landayan', 'Cuyab', 'Nueva', 'San Vicente'],
-    'Calamba': ['Real', 'Turbina', 'Bagong Kalsada', 'Palo Alto'],
-    'Quezon City': ['Commonwealth', 'Cubao', 'Tatalon', 'Batasan'],
-    'Manila': ['Binondo', 'Intramuros', 'Sta. Cruz', 'San Nicolas'],
-    'Pasig': ['San Joaquin', 'Bambang', 'Capitolyo', 'Manggahan'],
-    'Makati': ['Bel-Air', 'Poblacion', 'San Lorenzo', 'Magallanes'],
-    'Lucena': ['Dalahican', 'Mayao', 'Barangay 1', 'Gulang-Gulang'],
-    'Tayabas': ['Bukal', 'Calao', 'Ibas', 'Poblacion'],
-    'Sariaya': ['Canda', 'Concepcion', 'Mabini', 'Talaan'],
-    'Candelaria': ['Masin', 'San Vicente', 'Bahay', 'Poblacion'],
-  };
-
-  final Map<String, String> _zipCodeByCity = {
-    'San Jose Del Monte': '3023',
-    'Marilao': '3019',
-    'Meycauayan': '3020',
-    'Norzagaray': '3013',
-    'Santa Maria': '3022',
-    'General Trias': '4107',
-    'Dasmariñas': '4114',
-    'Imus': '4103',
-    'Tagaytay': '4120',
-    'Santa Rosa': '4026',
-    'Biñan': '4024',
-    'San Pedro': '4023',
-    'Calamba': '4027',
-    'Quezon City': '1101',
-    'Manila': '1000',
-    'Pasig': '1600',
-    'Makati': '1200',
-    'Lucena': '4301',
-    'Tayabas': '4327',
-    'Sariaya': '4322',
-    'Candelaria': '4323',
-  };
-
-  String _selectedProvince = 'Bulacan';
-  String _selectedCity = 'San Jose Del Monte';
-  String _selectedBarangay = 'Lourdes';
+  String _selectedProvince = '';
+  String _selectedCity = '';
+  String _selectedBarangay = '';
+  String? _selectedProvinceCode;
+  String? _selectedCityCode;
+  String? _selectedBarangayCode;
+  bool _isAddressLoading = true;
 
   DateTime? _selectedDateOfBirth;
 
@@ -358,11 +336,214 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _isLogin = true;
   bool _isLoading = false;
   bool _acceptedTerms = false;
+  String? _lastAutoFilledZipCode;
+
+  Future<void> _syncZipCodeFromSelection({
+    required String province,
+    required String city,
+    required String barangay,
+  }) async {
+    final verifiedZip = await PhilippineZipCodeLookup.resolvePostalCode(
+      province: province,
+      municipality: city,
+      barangay: barangay,
+    );
+
+    if (!mounted ||
+        province != _selectedProvince ||
+        city != _selectedCity ||
+        barangay != _selectedBarangay) {
+      return;
+    }
+
+    final currentZip = _zipCodeController.text.trim();
+
+    if (verifiedZip == null) {
+      if (currentZip.isEmpty || currentZip == _lastAutoFilledZipCode) {
+        _zipCodeController.text = '';
+        _lastAutoFilledZipCode = null;
+      }
+      return;
+    }
+
+    if (currentZip.isEmpty || currentZip == _lastAutoFilledZipCode) {
+      _zipCodeController.text = verifiedZip;
+      _lastAutoFilledZipCode = verifiedZip;
+      return;
+    }
+
+    _lastAutoFilledZipCode = null;
+  }
 
   @override
   void initState() {
     super.initState();
-    _applySelectedCityZipCode(_selectedCity);
+    _loadAddressOptions();
+  }
+
+  Future<void> _loadAddressOptions() async {
+    try {
+      await AddressData.loadData();
+
+      final provinceRecords =
+          deduplicateAddressOptions(
+            (AddressData.provinces ?? const [])
+                .map((province) => Map<String, dynamic>.from(province as Map))
+                .toList(),
+            codeKey: 'provinceCode',
+            nameKey: 'provinceName',
+          )..sort(
+            (a, b) => a['provinceName'].toString().compareTo(
+              b['provinceName'].toString(),
+            ),
+          );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _provinces = provinceRecords;
+        _selectedProvinceCode = provinceRecords.isNotEmpty
+            ? provinceRecords.first['provinceCode']?.toString()
+            : null;
+        _selectedProvince = provinceRecords.isNotEmpty
+            ? provinceRecords.first['provinceName']?.toString() ?? ''
+            : '';
+      });
+
+      if (_selectedProvinceCode != null) {
+        await _loadCitiesForProvince(_selectedProvinceCode!);
+      }
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isAddressLoading = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Address data could not be loaded. Please try again in a moment.',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _loadCitiesForProvince(String provinceCode) async {
+    final municipalities = deduplicateAddressOptions(
+      (await AddressService.getMunicipalitiesByProvince(
+        provinceCode: provinceCode,
+      )),
+      codeKey: 'municipalityCode',
+      nameKey: 'municipalityName',
+    );
+
+    if (!mounted || _selectedProvinceCode != provinceCode) {
+      return;
+    }
+
+    final cityCode =
+        resolveSelectedDropdownValue(
+          currentValue: _selectedCityCode,
+          items: municipalities,
+          codeKey: 'municipalityCode',
+          nameKey: 'municipalityName',
+        ) ??
+        (municipalities.isNotEmpty
+            ? municipalities.first['municipalityCode']?.toString()
+            : null);
+    final cityName = cityCode == null
+        ? ''
+        : municipalities
+                  .firstWhere(
+                    (city) => city['municipalityCode']?.toString() == cityCode,
+                    orElse: () => const {},
+                  )['municipalityName']
+                  ?.toString() ??
+              '';
+
+    setState(() {
+      _cities = municipalities;
+      _selectedCityCode = cityCode;
+      _selectedCity = cityName;
+      _selectedBarangay = '';
+      _selectedBarangayCode = null;
+      _isAddressLoading = false;
+    });
+
+    if (_selectedCityCode != null) {
+      await _loadBarangaysForCity(provinceCode, _selectedCityCode!);
+    }
+  }
+
+  Future<void> _loadBarangaysForCity(
+    String provinceCode,
+    String municipalityCode,
+  ) async {
+    final barangays = deduplicateAddressOptions(
+      await AddressService.getBarangaysByMunicipality(
+        provinceCode: provinceCode,
+        municipalityCode: municipalityCode,
+      ),
+      codeKey: 'barangayCode',
+      nameKey: 'barangayName',
+    );
+
+    if (!mounted ||
+        !addressSelectionMatchesRequest(
+          requestedProvinceCode: provinceCode,
+          requestedMunicipalityCode: municipalityCode,
+          selectedProvinceCode: _selectedProvinceCode,
+          selectedMunicipalityCode: _selectedCityCode,
+        )) {
+      return;
+    }
+
+    final barangayCode =
+        resolveSelectedDropdownValue(
+          currentValue: _selectedBarangayCode,
+          items: barangays,
+          codeKey: 'barangayCode',
+          nameKey: 'barangayName',
+        ) ??
+        (barangays.isNotEmpty
+            ? barangays.first['barangayCode']?.toString()
+            : null);
+    final barangayName = barangayCode == null
+        ? ''
+        : barangays
+                  .firstWhere(
+                    (barangay) =>
+                        barangay['barangayCode']?.toString() == barangayCode,
+                    orElse: () => const {},
+                  )['barangayName']
+                  ?.toString() ??
+              '';
+
+    setState(() {
+      _barangays = barangays;
+      _selectedBarangayCode = barangayCode;
+      _selectedBarangay = barangayName;
+    });
+
+    if (provinceCode == _selectedProvinceCode &&
+        municipalityCode == _selectedCityCode &&
+        _selectedProvince.isNotEmpty &&
+        _selectedCity.isNotEmpty &&
+        barangayName.isNotEmpty) {
+      await _syncZipCodeFromSelection(
+        province: _selectedProvince,
+        city: _selectedCity,
+        barangay: barangayName,
+      );
+    }
   }
 
   int _calculateAge(DateTime birthDate) {
@@ -376,11 +557,6 @@ class _AuthScreenState extends State<AuthScreen> {
     }
 
     return age;
-  }
-
-  void _applySelectedCityZipCode(String city) {
-    final zipCode = _zipCodeByCity[city] ?? '';
-    _zipCodeController.text = zipCode;
   }
 
   Future<void> _pickDateOfBirth() async {
@@ -485,8 +661,6 @@ class _AuthScreenState extends State<AuthScreen> {
 
         debugPrint('LOGIN STATUS: ${response.statusCode}');
 
-        debugPrint('LOGIN RESPONSE: ${response.body}');
-
         if (!mounted) return;
 
         // =================================================
@@ -526,13 +700,22 @@ class _AuthScreenState extends State<AuthScreen> {
 
           profileData['email_verified'] = data['email_verified'] ?? true;
 
-          profileData['first_name'] = '';
-          profileData['last_name'] = '';
+          profileData.addAll(nameFieldsFromLoginResponse(data));
 
           profileData['contact_number'] =
               data['contact_number'] ?? data['contact'] ?? data['phone'] ?? '';
 
           profileData['address'] = data['address'] ?? '';
+          profileData.addAll(structuredAddressFieldsFromLoginResponse(data));
+
+          final rawAddress = data['address'];
+
+          debugPrint(
+            'LOGIN ADDRESS DIAGNOSTIC: '
+            'type=${rawAddress.runtimeType}, '
+            'isMap=${rawAddress is Map}, '
+            'keys=${rawAddress is Map ? rawAddress.keys.toList() : const []}',
+          );
 
           profileData['gender'] = data['gender'] ?? 'Male';
 
@@ -543,27 +726,6 @@ class _AuthScreenState extends State<AuthScreen> {
 
           profileData['created_at'] =
               data['created_at'] ?? data['registered_at'] ?? '';
-
-          // =================================================
-          // SPLIT BACKEND "name"
-          // INTO FIRST/LAST NAME
-          // =================================================
-
-          if (data['name'] != null) {
-            final fullName = data['name'].toString().trim();
-
-            if (fullName.isNotEmpty) {
-              final parts = fullName.split(' ');
-
-              profileData['first_name'] = parts.first;
-
-              profileData['last_name'] = parts.length > 1
-                  ? parts.sublist(1).join(' ')
-                  : '';
-            }
-          }
-
-          debugPrint('LOGIN PROFILE DATA: $profileData');
 
           // =================================================
           // OPEN DASHBOARD
@@ -624,14 +786,13 @@ class _AuthScreenState extends State<AuthScreen> {
           return;
         }
 
-        final structuredAddress = [
-          _addressController.text.trim(),
-          if (_zipCodeController.text.trim().isNotEmpty)
-            'Zip Code: ${_zipCodeController.text.trim()}',
-          if (_selectedProvince.isNotEmpty) 'Province: $_selectedProvince',
-          if (_selectedCity.isNotEmpty) 'City/Municipality: $_selectedCity',
-          if (_selectedBarangay.isNotEmpty) 'Barangay: $_selectedBarangay',
-        ].where((part) => part.isNotEmpty).join(', ');
+        final structuredAddress = buildStructuredAddress(
+          streetAddress: _addressController.text.trim(),
+          zipCode: _zipCodeController.text.trim(),
+          province: _selectedProvince,
+          city: _selectedCity,
+          barangay: _selectedBarangay,
+        );
 
         final payload = {
           'name': fullNameParts.join(' '),
@@ -657,8 +818,6 @@ class _AuthScreenState extends State<AuthScreen> {
 
         debugPrint('REGISTER REQUEST: $uri');
 
-        debugPrint('REGISTER PAYLOAD: $payload');
-
         final response = await http
             .post(uri, headers: jsonHeaders, body: jsonEncode(payload))
             .timeout(const Duration(seconds: 15));
@@ -676,8 +835,6 @@ class _AuthScreenState extends State<AuthScreen> {
         }
 
         debugPrint('REGISTER STATUS: ${response.statusCode}');
-
-        debugPrint('REGISTER RESPONSE: ${response.body}');
 
         if (!mounted) return;
 
@@ -750,9 +907,21 @@ class _AuthScreenState extends State<AuthScreen> {
           _ageController.clear();
 
           setState(() {
-            _selectedProvince = 'Bulacan';
-            _selectedCity = 'San Jose Del Monte';
-            _selectedBarangay = 'Lourdes';
+            _selectedProvince = _provinces.isNotEmpty
+                ? _provinces.first['provinceName'].toString()
+                : '';
+            _selectedProvinceCode = _provinces.isNotEmpty
+                ? _provinces.first['provinceCode'].toString()
+                : null;
+            _selectedCity = _cities.isNotEmpty
+                ? _cities.first['municipalityName'].toString()
+                : '';
+            _selectedCityCode = _cities.isNotEmpty
+                ? _cities.first['municipalityCode'].toString()
+                : null;
+            _selectedBarangay = _barangays.isNotEmpty
+                ? _barangays.first['barangayName'].toString()
+                : '';
             _selectedDateOfBirth = null;
             _selectedGender = 'Male';
             _acceptedTerms = false;
@@ -1163,85 +1332,169 @@ class _AuthScreenState extends State<AuthScreen> {
                           },
                         ),
                         const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          initialValue: _selectedProvince,
-                          decoration: const InputDecoration(
-                            labelText: 'Province *',
-                          ),
-                          items: _provinces
-                              .map(
-                                (province) => DropdownMenuItem(
-                                  value: province,
-                                  child: Text(province),
+                        if (_isAddressLoading)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                            child: Center(
+                              child: SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
                                 ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setState(() {
-                              _selectedProvince = value;
-                              final cities =
-                                  _citiesByProvince[value] ?? const [];
-                              if (cities.isNotEmpty) {
-                                _selectedCity = cities.first;
-                                _applySelectedCityZipCode(_selectedCity);
-                                final barangays =
-                                    _barangaysByCity[_selectedCity] ?? const [];
-                                if (barangays.isNotEmpty) {
-                                  _selectedBarangay = barangays.first;
-                                }
-                              }
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          initialValue: _selectedCity,
-                          decoration: const InputDecoration(
-                            labelText: 'City / Municipality *',
-                          ),
-                          items:
-                              (_citiesByProvince[_selectedProvince] ?? const [])
-                                  .map(
-                                    (city) => DropdownMenuItem(
-                                      value: city,
-                                      child: Text(city),
+                              ),
+                            ),
+                          )
+                        else ...[
+                          DropdownButtonFormField<String>(
+                            value: _selectedProvinceCode,
+                            decoration: const InputDecoration(
+                              labelText: 'Province *',
+                            ),
+                            items: _provinces
+                                .map(
+                                  (province) => DropdownMenuItem(
+                                    value: province['provinceCode']?.toString(),
+                                    child: Text(
+                                      province['provinceName']?.toString() ??
+                                          '',
                                     ),
-                                  )
-                                  .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setState(() {
-                              _selectedCity = value;
-                              _applySelectedCityZipCode(value);
-                              final barangays =
-                                  _barangaysByCity[value] ?? const [];
-                              if (barangays.isNotEmpty) {
-                                _selectedBarangay = barangays.first;
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) async {
+                              if (value == null) return;
+                              final selectedProvince = _provinces.firstWhere(
+                                (province) =>
+                                    province['provinceCode']?.toString() ==
+                                    value,
+                                orElse: () => const {},
+                              );
+                              final provinceCode =
+                                  selectedProvince['provinceCode']?.toString();
+                              final provinceName =
+                                  selectedProvince['provinceName']?.toString();
+                              if (provinceCode == null ||
+                                  provinceName == null) {
+                                return;
                               }
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          initialValue: _selectedBarangay,
-                          decoration: const InputDecoration(
-                            labelText: 'Barangay *',
+
+                              setState(() {
+                                _selectedProvince = provinceName;
+                                _selectedProvinceCode = provinceCode;
+                                _selectedCity = '';
+                                _selectedCityCode = null;
+                                _selectedBarangay = '';
+                                _selectedBarangayCode = null;
+                              });
+
+                              await _syncZipCodeFromSelection(
+                                province: provinceName,
+                                city: '',
+                                barangay: '',
+                              );
+                              await _loadCitiesForProvince(provinceCode);
+                            },
                           ),
-                          items: (_barangaysByCity[_selectedCity] ?? const [])
-                              .map(
-                                (barangay) => DropdownMenuItem(
-                                  value: barangay,
-                                  child: Text(barangay),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null) {
-                              setState(() => _selectedBarangay = value);
-                            }
-                          },
-                        ),
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<String>(
+                            value: _selectedCityCode,
+                            decoration: const InputDecoration(
+                              labelText: 'City / Municipality *',
+                            ),
+                            items: _cities
+                                .map(
+                                  (city) => DropdownMenuItem(
+                                    value: city['municipalityCode']?.toString(),
+                                    child: Text(
+                                      city['municipalityName']?.toString() ??
+                                          '',
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) async {
+                              if (value == null) return;
+                              final city = _cities.firstWhere(
+                                (record) =>
+                                    record['municipalityCode']?.toString() ==
+                                    value,
+                                orElse: () => const {},
+                              );
+                              final municipalityCode = city['municipalityCode']
+                                  ?.toString();
+                              final municipalityName = city['municipalityName']
+                                  ?.toString();
+                              if (municipalityCode == null ||
+                                  municipalityName == null ||
+                                  _selectedProvinceCode == null) {
+                                return;
+                              }
+
+                              setState(() {
+                                _selectedCity = municipalityName;
+                                _selectedCityCode = municipalityCode;
+                                _selectedBarangay = '';
+                                _selectedBarangayCode = null;
+                              });
+
+                              await _syncZipCodeFromSelection(
+                                province: _selectedProvince,
+                                city: municipalityName,
+                                barangay: '',
+                              );
+                              await _loadBarangaysForCity(
+                                _selectedProvinceCode!,
+                                municipalityCode,
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<String>(
+                            value: _selectedBarangayCode,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              labelText: 'Barangay *',
+                            ),
+                            items: _barangays
+                                .map(
+                                  (barangay) => DropdownMenuItem(
+                                    value: barangay['barangayCode']?.toString(),
+                                    child: Text(
+                                      barangay['barangayName']?.toString() ??
+                                          '',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) async {
+                              if (value == null) return;
+                              final barangay = _barangays.firstWhere(
+                                (record) =>
+                                    record['barangayCode']?.toString() == value,
+                                orElse: () => const {},
+                              );
+                              final barangayName = barangay['barangayName']
+                                  ?.toString();
+                              if (barangayName == null) {
+                                return;
+                              }
+
+                              setState(() {
+                                _selectedBarangayCode = value;
+                                _selectedBarangay = barangayName;
+                              });
+
+                              await _syncZipCodeFromSelection(
+                                province: _selectedProvince,
+                                city: _selectedCity,
+                                barangay: barangayName,
+                              );
+                            },
+                          ),
+                        ],
                       ],
                       if (!_isLogin) ...[
                         const SizedBox(height: 16),
@@ -1347,9 +1600,16 @@ class _AuthScreenState extends State<AuthScreen> {
               ),
               const SizedBox(height: 18),
               TextButton(
-                onPressed: () {},
+                key: const ValueKey('forgot-password-link'),
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const ForgotPasswordScreen(),
+                    ),
+                  );
+                },
                 child: const Text(
-                  'Recover Password or contact support',
+                  'Forgot Password?',
                   style: TextStyle(
                     color: Color(0xFF0F76FF),
                     fontWeight: FontWeight.w600,
@@ -1371,7 +1631,7 @@ class FrameModel {
   final String? material;
   final String? category;
   final String? description;
-  final double price;
+  final double? price;
   final int stockQuantity;
   final String? imageUrl;
 
@@ -1406,15 +1666,36 @@ class FrameModel {
       description: json['description'] == null
           ? null
           : json['description'].toString(),
-      price: rawPrice is num
-          ? rawPrice.toDouble()
-          : (rawPrice is String ? double.tryParse(rawPrice) ?? 0.0 : 0.0),
+      price: parseFramePrice(rawPrice),
       stockQuantity: rawStock is num
           ? rawStock.toInt()
           : (rawStock is String ? int.tryParse(rawStock) ?? 0 : 0),
       imageUrl: rawImage == null ? null : rawImage.toString(),
     );
   }
+}
+
+double? parseFramePrice(dynamic rawPrice) {
+  final price = switch (rawPrice) {
+    num value => value.toDouble(),
+    String value => double.tryParse(value.trim()),
+    _ => null,
+  };
+  return price != null && price.isFinite ? price : null;
+}
+
+String formatPhilippinePeso(double? price) {
+  if (price == null || !price.isFinite) return 'Price unavailable';
+
+  final fixedPrice = price.abs().toStringAsFixed(2);
+  final decimalIndex = fixedPrice.indexOf('.');
+  final integerPart = fixedPrice.substring(0, decimalIndex);
+  final groupedInteger = integerPart.replaceAllMapped(
+    RegExp(r'\B(?=(\d{3})+(?!\d))'),
+    (_) => ',',
+  );
+  final sign = price < 0 ? '-' : '';
+  return '₱$sign$groupedInteger${fixedPrice.substring(decimalIndex)}';
 }
 
 class DashboardScreen extends StatefulWidget {
@@ -1428,8 +1709,12 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   int _selectedIndex = 0;
+  int _profileRefreshGeneration = 0;
+  bool _exitDialogOpen = false;
 
   late Map<String, dynamic> _profile;
+  bool _loadingProfile = false;
+  String? _profileLoadError;
 
   bool _loadingAppointments = false;
   bool _loadingFrames = false;
@@ -1530,11 +1815,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // =====================================================
 
   Future<void> _refreshProfile() async {
+    final generation = _profileRefreshGeneration;
+    if (mounted) {
+      setState(() {
+        _loadingProfile = true;
+        _profileLoadError = null;
+      });
+    }
     try {
       final pid = _profile['patient_id'];
 
       if (pid == null || pid.toString().trim().isEmpty) {
         debugPrint('PROFILE REFRESH: No patient ID available.');
+        if (mounted && generation == _profileRefreshGeneration) {
+          setState(() {
+            _loadingProfile = false;
+            _profileLoadError = 'Unable to load profile. Please try again.';
+          });
+        }
         return;
       }
 
@@ -1548,8 +1846,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         '${Uri.encodeComponent(pid.toString())}',
       );
 
-      debugPrint('PROFILE API REQUEST: $uri');
-
       final response = await http
           .get(uri, headers: jsonHeaders)
           .timeout(const Duration(seconds: 15));
@@ -1559,24 +1855,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
         '${response.statusCode}',
       );
 
+      final data = patientProfileFromResponse(jsonDecode(response.body));
+
+      const addressDiagnosticKeys = [
+        'address',
+        'address_unit',
+        'address_street',
+        'address_barangay',
+        'address_city_municipality',
+        'address_province',
+        'address_zip_code',
+      ];
+      final addressFieldDiagnostics = addressDiagnosticKeys
+          .map((key) {
+            final exists = data.containsKey(key);
+            final type = exists
+                ? data[key]?.runtimeType.toString() ?? 'Null'
+                : 'absent';
+            return '$key={exists:$exists,type:$type}';
+          })
+          .join(', ');
       debugPrint(
-        'PROFILE API RESPONSE: '
-        '${response.body}',
+        'PROFILE REFRESH ADDRESS DIAGNOSTICS: status=${response.statusCode}, '
+        '$addressFieldDiagnostics',
       );
 
-      Map<String, dynamic> data = {};
-
-      try {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
-        }
-      } catch (_) {
-        data = {};
-      }
-
-      if (!mounted) return;
+      if (!mounted || generation != _profileRefreshGeneration) return;
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         // =================================================
@@ -1586,8 +1890,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
         setState(() {
           _profile = {
-            ..._profile,
-            ...data,
+            ...mergeProfileRefreshData(_profile, data),
 
             // Map backend field names
             // to the names already used
@@ -1617,6 +1920,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
             'last_visit': data['last_visit'] ?? _profile['last_visit'],
           };
+          _loadingProfile = false;
+          _profileLoadError = null;
 
           // =================================================
           // SPLIT "name" INTO FIRST/LAST NAME
@@ -1645,16 +1950,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
             }
           }
         });
-
-        debugPrint('PROFILE REFRESH SUCCESS: $_profile');
       } else {
-        debugPrint(
-          'PROFILE REFRESH FAILED: '
-          '${data['message'] ?? data['error']}',
-        );
+        debugPrint('PROFILE REFRESH FAILED: status=${response.statusCode}');
+        if (mounted && generation == _profileRefreshGeneration) {
+          setState(() {
+            _loadingProfile = false;
+            _profileLoadError = 'Unable to load profile. Please try again.';
+          });
+        }
       }
-    } catch (e) {
-      debugPrint('Unable to refresh profile: $e');
+    } catch (error) {
+      debugPrint('Unable to refresh profile: ${error.runtimeType}');
+      if (mounted && generation == _profileRefreshGeneration) {
+        setState(() {
+          _loadingProfile = false;
+          _profileLoadError = 'Unable to load profile. Please try again.';
+        });
+      }
     }
   }
 
@@ -1884,9 +2196,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _onItemTapped(int index) {
+    if (index < 0 || index >= 5) {
+      throw RangeError.range(index, 0, 4, 'index');
+    }
     setState(() {
       _selectedIndex = index;
     });
+  }
+
+  void _openAppointmentScheduler() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => AppointmentSchedulerScreen(
+          patientId: _profile['patient_id'],
+          onScheduled: _loadAppointments,
+        ),
+      ),
+    );
+  }
+
+  Future<bool?> _showConfirmationDialog({
+    required String title,
+    required String message,
+    required String cancelLabel,
+    required String confirmLabel,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          title,
+          style: const TextStyle(
+            color: Color(0xFF0F76FF),
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(cancelLabel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Color(0xFF0F76FF)),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmExit() async {
+    if (_exitDialogOpen || !mounted) return;
+
+    _exitDialogOpen = true;
+    try {
+      final shouldExit = await _showConfirmationDialog(
+        title: 'Are you sure you want to exit?',
+        message: 'Do you want to close the app?',
+        cancelLabel: 'No',
+        confirmLabel: 'Yes',
+      );
+      if (shouldExit == true) {
+        await SystemNavigator.pop();
+      }
+    } finally {
+      _exitDialogOpen = false;
+    }
+  }
+
+  Future<void> _confirmLogout() async {
+    final shouldLogout = await _showConfirmationDialog(
+      title: 'Are you sure you want to log out?',
+      message: 'You will need to log in again to access your account.',
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Yes, Log Out',
+    );
+    if (shouldLogout == true && mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const AuthScreen()),
+        (route) => false,
+      );
+    }
   }
 
   @override
@@ -2145,26 +2539,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _DashboardTile(
                 label: 'Book Appointment',
                 icon: Icons.calendar_month,
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => AppointmentSchedulerScreen(
-                        patientId: _profile['patient_id'],
-                        onScheduled: _loadAppointments,
-                      ),
-                    ),
-                  );
-                },
+                onTap: _openAppointmentScheduler,
               ),
               _DashboardTile(
                 label: 'Explore Frames',
                 icon: Icons.grid_view_rounded,
                 onTap: () => _onItemTapped(1),
-              ),
-              _DashboardTile(
-                label: 'My Profile',
-                icon: Icons.person_outline,
-                onTap: () => _onItemTapped(3),
               ),
               _DashboardTile(
                 label: 'My Appointments',
@@ -2174,15 +2554,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _DashboardTile(
                 label: 'Transaction History',
                 icon: Icons.receipt_long_rounded,
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => TransactionHistoryScreen(
-                        patientId: _profile['patient_id']?.toString(),
-                      ),
-                    ),
-                  );
-                },
+                onTap: () => _onItemTapped(3),
+              ),
+              _DashboardTile(
+                label: 'My Profile',
+                icon: Icons.person_outline,
+                onTap: () => _onItemTapped(4),
               ),
             ],
           ),
@@ -2201,7 +2578,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Expanded(
                 child: _SummaryTile(
                   value: _appointments.length.toString(),
-                  label: 'Booked visits',
+                  label: 'Booked Appointments',
                 ),
               ),
               const SizedBox(width: 10),
@@ -2387,7 +2764,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Text(
-                        '₱${frame.price.toStringAsFixed(2)}',
+                        formatPhilippinePeso(frame.price),
                         style: const TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
@@ -2852,7 +3229,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       children: [
                                         Expanded(
                                           child: Text(
-                                            '₱${frame.price.toStringAsFixed(2)}',
+                                            formatPhilippinePeso(frame.price),
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
@@ -3340,10 +3717,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     );
 
                 if (result != null && mounted) {
+                  _profileRefreshGeneration++;
                   setState(() {
                     _profile = {..._profile, ...result};
                   });
-                  await _refreshProfile();
+                  final matchesConfirmedResponse =
+                      _profile['address'] == result['address'];
+                  debugPrint(
+                    'PROFILE ADDRESS STATE: '
+                    'matchesConfirmedResponse=$matchesConfirmedResponse',
+                  );
                 }
               },
               icon: const Icon(Icons.edit_outlined),
@@ -3365,6 +3748,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
             'Personal information',
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
+          if (_loadingProfile)
+            const Padding(
+              key: ValueKey('profile-loading'),
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          if (_profileLoadError != null)
+            Padding(
+              key: const ValueKey('profile-load-error'),
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _profileLoadError!,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _refreshProfile,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 10),
           Card(
             margin: EdgeInsets.zero,
@@ -3387,10 +3795,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     label: 'Contact number',
                     value: contact.isEmpty ? '-' : contact,
                   ),
-                  _ProfileInfoRow(
-                    icon: Icons.home_outlined,
-                    label: 'Address',
-                    value: address.isEmpty ? '-' : address,
+                  ProfileAddressDisplay(
+                    address: address,
+                    structuredAddress: {
+                      'address_unit': _profile['address_unit'],
+                      'address_street': _profile['address_street'],
+                      'address_barangay': _profile['address_barangay'],
+                      'address_city_municipality':
+                          _profile['address_city_municipality'],
+                      'address_province': _profile['address_province'],
+                      'address_zip_code': _profile['address_zip_code'],
+                    },
                   ),
                   _ProfileInfoRow(
                     icon: Icons.cake_outlined,
@@ -3480,104 +3895,121 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _buildHomeTab(),
       _buildFramesTab(),
       _buildAppointmentsTab(),
+      TransactionHistoryScreen(
+        patientId: _profile['patient_id']?.toString(),
+        showScaffold: false,
+      ),
       _buildProfileTab(),
     ];
 
-    return Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 72,
-        centerTitle: true,
-        title: const Text(
-          'Gonzales Vision Clinic',
-          textAlign: TextAlign.center,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: const Color(0xFF0F76FF),
-        actions: [
-          // =====================================================
-          // NOTIFICATIONS
-          // =====================================================
+    return PopScope<Object?>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_confirmExit());
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          toolbarHeight: 72,
+          centerTitle: true,
+          title: Text(
+            _selectedIndex == 3
+                ? 'Transaction History'
+                : 'Gonzales Vision Clinic',
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          backgroundColor: const Color(0xFF0F76FF),
+          actions: [
+            // =====================================================
+            // NOTIFICATIONS
+            // =====================================================
 
-          IconButton(
-            icon: Stack(
-              alignment: Alignment.topRight,
-              children: [
-                const Icon(Icons.notifications),
-                if (notificationsController.unreadCount > 0)
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    child: Container(
-                      width: 10,
-                      height: 10,
-                      decoration: const BoxDecoration(
-                        color: Colors.red,
-                        shape: BoxShape.circle,
+            IconButton(
+              icon: Stack(
+                alignment: Alignment.topRight,
+                children: [
+                  const Icon(Icons.notifications),
+                  if (notificationsController.unreadCount > 0)
+                    Positioned(
+                      right: 0,
+                      top: 0,
+                      child: Container(
+                        width: 10,
+                        height: 10,
+                        decoration: const BoxDecoration(
+                          color: Colors.red,
+                          shape: BoxShape.circle,
+                        ),
                       ),
                     ),
+                ],
+              ),
+              tooltip: 'Notifications',
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => NotificationScreen(
+                      patientId: _profile['patient_id']?.toString() ?? '',
+                    ),
                   ),
-              ],
+                );
+              },
             ),
-            tooltip: 'Notifications',
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => NotificationScreen(
-                    patientId: _profile['patient_id']?.toString() ?? '',
+
+            // =====================================================
+            // SETTINGS
+            // =====================================================
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        SettingsScreen(patientId: _profile['patient_id']),
                   ),
-                ),
-              );
-            },
-          ),
+                );
+              },
+            ),
 
-          // =====================================================
-          // SETTINGS
-          // =====================================================
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) =>
-                      SettingsScreen(patientId: _profile['patient_id']),
-                ),
-              );
-            },
-          ),
-
-          // =====================================================
-          // LOGOUT
-          // =====================================================
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: () {
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const AuthScreen()),
-                (route) => false,
-              );
-            },
-          ),
-        ],
-      ),
-      body: tabs[_selectedIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        onTap: _onItemTapped,
-        selectedItemColor: const Color(0xFF0F76FF),
-        unselectedItemColor: Colors.grey,
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.grid_view), label: 'Frames'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_today),
-            label: 'Appointments',
-          ),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
-        ],
+            // =====================================================
+            // LOGOUT
+            // =====================================================
+            IconButton(
+              icon: const Icon(Icons.logout),
+              tooltip: 'Logout',
+              onPressed: _confirmLogout,
+            ),
+          ],
+        ),
+        body: IndexedStack(index: _selectedIndex, children: tabs),
+        bottomNavigationBar: BottomNavigationBar(
+          currentIndex: _selectedIndex,
+          onTap: _onItemTapped,
+          selectedItemColor: const Color(0xFF0F76FF),
+          unselectedItemColor: Colors.grey,
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Dashboard'),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.grid_view_rounded),
+              label: 'Explore Frames',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.event_available_outlined),
+              label: 'My Appointments',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.receipt_long_rounded),
+              label: 'Transaction History',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.person_outline),
+              label: 'My Profile',
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3774,6 +4206,85 @@ class _ProfileInfoRow extends StatelessWidget {
       ],
     );
   }
+}
+
+class ProfileAddressDisplay extends StatelessWidget {
+  const ProfileAddressDisplay({
+    super.key,
+    required this.address,
+    this.structuredAddress,
+  });
+
+  final String address;
+  final Map<String, dynamic>? structuredAddress;
+
+  @override
+  Widget build(BuildContext context) {
+    if (structuredAddress != null) {
+      const components = [
+        ('Unit', 'address_unit'),
+        ('Street', 'address_street'),
+        ('Barangay', 'address_barangay'),
+        ('City/Municipality', 'address_city_municipality'),
+        ('Province', 'address_province'),
+        ('ZIP Code', 'address_zip_code'),
+      ];
+      return Column(
+        children: [
+          for (var index = 0; index < components.length; index++)
+            _ProfileInfoRow(
+              icon: Icons.home_outlined,
+              label: components[index].$1,
+              value: _profileAddressDisplayValue(
+                structuredAddress![components[index].$2],
+              ),
+              showDivider: index < components.length - 1,
+            ),
+        ],
+      );
+    }
+
+    final parsed = parseStructuredAddress(address);
+    final structuredComponents = <(String, String)>[
+      ('ZIP Code', parsed['zipCode'] ?? ''),
+      ('Province', parsed['province'] ?? ''),
+      ('City/Municipality', parsed['city'] ?? ''),
+      ('Barangay', parsed['barangay'] ?? ''),
+    ].where((component) => component.$2.isNotEmpty).toList();
+
+    if (structuredComponents.isEmpty) {
+      return _ProfileInfoRow(
+        icon: Icons.home_outlined,
+        label: 'Address',
+        value: address.isEmpty ? '-' : address,
+        showDivider: false,
+      );
+    }
+
+    final components = <(String, String)>[
+      if ((parsed['streetAddress'] ?? '').isNotEmpty)
+        ('Street Address', parsed['streetAddress']!),
+      ...structuredComponents,
+    ];
+
+    return Column(
+      children: [
+        for (var index = 0; index < components.length; index++)
+          _ProfileInfoRow(
+            icon: Icons.home_outlined,
+            label: components[index].$1,
+            value: components[index].$2,
+            showDivider: index < components.length - 1,
+          ),
+      ],
+    );
+  }
+}
+
+String _profileAddressDisplayValue(dynamic value) {
+  if (value == null) return 'Not provided';
+  final text = value.toString();
+  return text.trim().isEmpty ? 'Not provided' : text;
 }
 
 class _ProfileDetail extends StatelessWidget {

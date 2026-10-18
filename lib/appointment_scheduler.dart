@@ -40,6 +40,14 @@ bool isDateSelectableForBooking(DateTime date, Set<DateTime> closedDates) {
       !isClinicClosedDate(normalized, closedDates);
 }
 
+bool canSubmitAppointmentOnDate(
+  DateTime date,
+  Set<DateTime> closedDates, {
+  required bool closuresVerified,
+}) {
+  return closuresVerified && isDateSelectableForBooking(date, closedDates);
+}
+
 DateTime nextAvailableClinicDate(DateTime date, Set<DateTime> closedDates) {
   var nextDate = DateTime(date.year, date.month, date.day);
 
@@ -54,47 +62,257 @@ Set<DateTime> parseClinicClosureDates(dynamic data) {
   final closureDates = <DateTime>{};
 
   if (data is! List) {
-    return closureDates;
+    throw const FormatException('Invalid clinic closure response.');
   }
 
   for (final item in data) {
-    String? rawDate;
-
     if (item is String) {
-      rawDate = item;
-    } else if (item is Map) {
-      rawDate =
-          item['closure_date']?.toString() ??
-          item['date']?.toString() ??
-          item['closed_date']?.toString() ??
-          item['closed_on']?.toString() ??
-          item['holiday_date']?.toString() ??
-          item['clinic_date']?.toString();
-    }
-
-    if (rawDate == null || rawDate.trim().isEmpty) {
+      final date = _parseClinicClosureDate(item);
+      if (date == null) {
+        throw const FormatException('Invalid clinic closure date.');
+      }
+      closureDates.add(date);
       continue;
     }
 
-    final parsed = DateTime.tryParse(rawDate.trim());
-    if (parsed == null) {
+    if (item is! Map) {
+      throw const FormatException('Invalid clinic closure date.');
+    }
+
+    if (item.containsKey('start_date') || item.containsKey('end_date')) {
+      final startDate = _parseClinicClosureDateOnly(
+        item['start_date']?.toString() ?? '',
+      );
+      final endDate = _parseClinicClosureDateOnly(
+        item['end_date']?.toString() ?? '',
+      );
+      if (startDate == null || endDate == null || startDate.isAfter(endDate)) {
+        throw const FormatException('Invalid clinic closure date range.');
+      }
+
+      for (
+        var date = startDate;
+        !date.isAfter(endDate);
+        date = date.add(const Duration(days: 1))
+      ) {
+        closureDates.add(date);
+      }
       continue;
     }
 
-    closureDates.add(DateTime(parsed.year, parsed.month, parsed.day));
+    const legacyDateKeys = [
+      'closure_date',
+      'date',
+      'closed_date',
+      'closed_on',
+      'holiday_date',
+      'clinic_date',
+    ];
+    final legacyDateKey = legacyDateKeys.firstWhere(
+      item.containsKey,
+      orElse: () => '',
+    );
+    final date = _parseClinicClosureDate(
+      legacyDateKey.isEmpty ? '' : item[legacyDateKey]?.toString() ?? '',
+    );
+    if (date == null) {
+      throw const FormatException('Invalid clinic closure date.');
+    }
+    closureDates.add(date);
   }
 
   return closureDates;
 }
 
+Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
+  final closedDates = parseClinicClosureDates(data);
+  final reasonsByDate = {
+    for (final date in closedDates) date: <String>{},
+  };
+
+  void addReason(Iterable<DateTime> dates, dynamic rawReason) {
+    final reason = rawReason is String ? rawReason.trim() : '';
+    final displayReason = reason.isEmpty ? 'No reason provided.' : reason;
+    for (final date in dates) {
+      reasonsByDate[date]!.add(displayReason);
+    }
+  }
+
+  for (final item in data as List) {
+    if (item is String) {
+      final date = _parseClinicClosureDate(item)!;
+      addReason([date], null);
+      continue;
+    }
+
+    final record = item as Map;
+    if (record.containsKey('start_date') || record.containsKey('end_date')) {
+      final startDate = _parseClinicClosureDateOnly(
+        record['start_date']?.toString() ?? '',
+      )!;
+      final endDate = _parseClinicClosureDateOnly(
+        record['end_date']?.toString() ?? '',
+      )!;
+      final dates = <DateTime>[];
+      for (
+        var date = startDate;
+        !date.isAfter(endDate);
+        date = date.add(const Duration(days: 1))
+      ) {
+        dates.add(date);
+      }
+      addReason(dates, record['reason']);
+      continue;
+    }
+
+    const legacyDateKeys = [
+      'closure_date',
+      'date',
+      'closed_date',
+      'closed_on',
+      'holiday_date',
+      'clinic_date',
+    ];
+    final dateKey = legacyDateKeys.firstWhere(
+      record.containsKey,
+      orElse: () => '',
+    );
+    final date = _parseClinicClosureDate(
+      dateKey.isEmpty ? '' : record[dateKey]?.toString() ?? '',
+    )!;
+    addReason([date], record['reason']);
+  }
+
+  return reasonsByDate;
+}
+
+DateTime? _parseClinicClosureDate(String rawDate) {
+  final normalizedRaw = rawDate.trim();
+  final dateMatch = RegExp(r'^(\d{4})-(\d{2})-(\d{2})').firstMatch(
+    normalizedRaw,
+  );
+  if (dateMatch == null) return null;
+
+  final isDateOnly = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(normalizedRaw);
+  final isIsoTimestamp = RegExp(
+    r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$',
+  ).hasMatch(normalizedRaw);
+  if (!isDateOnly && !isIsoTimestamp) return null;
+  if (!isDateOnly && DateTime.tryParse(normalizedRaw) == null) return null;
+
+  final year = int.parse(dateMatch.group(1)!);
+  final month = int.parse(dateMatch.group(2)!);
+  final day = int.parse(dateMatch.group(3)!);
+  final normalized = DateTime(year, month, day);
+  if (normalized.year != year ||
+      normalized.month != month ||
+      normalized.day != day) {
+    return null;
+  }
+  return normalized;
+}
+
+DateTime? _parseClinicClosureDateOnly(String rawDate) {
+  final normalizedRaw = rawDate.trim();
+  if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(normalizedRaw)) return null;
+  return _parseClinicClosureDate(normalizedRaw);
+}
+
+String clinicClosureResponseShape(dynamic data) {
+  String typeOf(Object? value) {
+    if (value == null) return 'null';
+    if (value is List) return 'list';
+    if (value is Map) return 'object';
+    if (value is String) return 'string';
+    if (value is num) return 'number';
+    if (value is bool) return 'boolean';
+    return 'other';
+  }
+
+  const dateKeys = [
+    'start_date',
+    'end_date',
+    'closure_date',
+    'date',
+    'closed_date',
+    'closed_on',
+    'holiday_date',
+    'clinic_date',
+  ];
+
+  if (data is List) {
+    var supportedDateFields = 0;
+    var parseableDates = 0;
+    final itemFieldNames = <String>{};
+    for (final item in data) {
+      if (item is String) {
+        if (_parseClinicClosureDate(item.trim()) != null) parseableDates++;
+      } else if (item is Map) {
+        for (final key in item.keys) {
+          if (itemFieldNames.length >= 12) break;
+          itemFieldNames.add(_safeFieldName(key));
+        }
+        if (item.containsKey('start_date') || item.containsKey('end_date')) {
+          if (item.containsKey('start_date') && item.containsKey('end_date')) {
+            supportedDateFields++;
+            final startDate = _parseClinicClosureDateOnly(
+              item['start_date']?.toString() ?? '',
+            );
+            final endDate = _parseClinicClosureDateOnly(
+              item['end_date']?.toString() ?? '',
+            );
+            if (startDate != null &&
+                endDate != null &&
+                !startDate.isAfter(endDate)) {
+              parseableDates++;
+            }
+          }
+        } else {
+          final key = dateKeys.firstWhere(
+            (key) => key != 'start_date' && key != 'end_date' && item[key] != null,
+            orElse: () => '',
+          );
+          if (key.isEmpty) continue;
+          supportedDateFields++;
+          final rawDate = item[key]?.toString().trim() ?? '';
+          if (rawDate.isNotEmpty &&
+              _parseClinicClosureDate(rawDate) != null) {
+            parseableDates++;
+          }
+        }
+      }
+    }
+    return 'jsonType=list itemCount=${data.length} '
+        'itemFieldNames=${itemFieldNames.isEmpty ? 'none' : itemFieldNames.join(',')} '
+        'supportedDateFieldCount=$supportedDateFields '
+        'parseableDateCount=$parseableDates';
+  }
+
+  if (data is Map) {
+    final fieldNames = data.keys.take(12).map(_safeFieldName).join(',');
+    return 'jsonType=object '
+        'fieldNames=${fieldNames.isEmpty ? 'none' : fieldNames}';
+  }
+
+  return 'jsonType=${typeOf(data)}';
+}
+
+String _safeFieldName(Object? key) {
+  final name = key.toString();
+  final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '?');
+  return safe.length > 64 ? safe.substring(0, 64) : safe;
+}
+
 class AppointmentSchedulerScreen extends StatefulWidget {
   final dynamic patientId;
   final Future<void> Function() onScheduled;
+  final http.Client? client;
 
   const AppointmentSchedulerScreen({
     super.key,
     required this.patientId,
     required this.onScheduled,
+    this.client,
   });
 
   @override
@@ -104,7 +322,10 @@ class AppointmentSchedulerScreen extends StatefulWidget {
 
 class _AppointmentSchedulerScreenState
     extends State<AppointmentSchedulerScreen> {
+  late final http.Client _client = widget.client ?? http.Client();
+  late final bool _ownsClient = widget.client == null;
   DateTime _selectedDate = DateTime.now();
+  DateTime _visibleMonth = DateTime.now();
 
   TimeOfDay? _selectedTime;
 
@@ -122,6 +343,9 @@ class _AppointmentSchedulerScreenState
   bool _refreshingAvailability = false;
 
   String? _availabilityError;
+  String? _closureError;
+  bool _closuresVerified = false;
+  bool _loadingClosures = true;
 
   Timer? _availabilityRefreshTimer;
 
@@ -167,6 +391,7 @@ class _AppointmentSchedulerScreenState
   final Set<String> _bookedSlots = {};
 
   final Set<DateTime> _closedDates = {};
+  Map<DateTime, Set<String>> _closureReasonsByDate = {};
 
   /*
   ============================================================
@@ -284,7 +509,7 @@ class _AppointmentSchedulerScreenState
 
       debugPrint('APPOINTMENT AVAILABILITY REQUEST: $uri');
 
-      final response = await http
+      final response = await _client
           .get(uri, headers: {'Accept': 'application/json'})
           .timeout(const Duration(seconds: 15));
 
@@ -413,62 +638,114 @@ class _AppointmentSchedulerScreenState
     }
 
     await _loadBookedSlots(showLoading: false);
-    await _loadClosedDates(showLoading: false);
+    await _loadClosedDates();
   }
 
-  Future<void> _loadClosedDates({bool showLoading = true}) async {
-    if (!mounted) return;
+  String _safeContentType(String? contentType) {
+    if (contentType == null) return 'unknown';
+    return contentType.split(';').first.trim().toLowerCase();
+  }
 
-    if (showLoading) {
-      setState(() {
-        _loadingAvailability = true;
-        _availabilityError = null;
-      });
-    }
+  Future<void> _loadClosedDates() async {
+    if (!mounted) return;
+    final dateBeforeRefresh = _selectedDate;
+    final timeBeforeRefresh = _selectedTime;
+    var responseStatusCode = 0;
+    var responseContentType = 'unknown';
+    var responseShape = 'unparsed';
+    var failureReason = 'request_error';
+
+    setState(() {
+      _loadingClosures = true;
+      _closuresVerified = false;
+      _closureError = null;
+    });
 
     try {
       final uri = Uri.parse('$apiBaseUrl/api/clinic-closures');
 
-      debugPrint('CLINIC CLOSURE REQUEST: $uri');
+      debugPrint(
+        'CLINIC CLOSURE REQUEST: '
+        'scheme=${uri.scheme} host=${uri.host} path=${uri.path}',
+      );
 
-      final response = await http
+      final response = await _client
           .get(uri, headers: {'Accept': 'application/json'})
           .timeout(const Duration(seconds: 15));
 
-      debugPrint('CLINIC CLOSURE STATUS: ${response.statusCode}');
+      responseStatusCode = response.statusCode;
+      responseContentType = _safeContentType(response.headers['content-type']);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        failureReason = 'http_status';
         throw Exception('Failed to load clinic closure dates.');
       }
 
-      final decoded = jsonDecode(response.body);
-      final nextClosedDates = parseClinicClosureDates(decoded);
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(response.body);
+      } on FormatException {
+        responseShape = 'invalidJson';
+        failureReason = 'json_decode';
+        rethrow;
+      }
+      responseShape = clinicClosureResponseShape(decoded);
+      late final Set<DateTime> nextClosedDates;
+      late final Map<DateTime, Set<String>> nextClosureReasons;
+      try {
+        nextClosedDates = parseClinicClosureDates(decoded);
+        nextClosureReasons = parseClinicClosureReasons(decoded);
+      } on FormatException {
+        failureReason = 'unsupported_json_shape_or_date';
+        rethrow;
+      }
+
+      debugPrint(
+        'CLINIC CLOSURE RESPONSE: status=$responseStatusCode '
+        'contentType=$responseContentType $responseShape '
+        'verification=success dateCount=${nextClosedDates.length}',
+      );
 
       if (!mounted) return;
 
       setState(() {
         _closedDates.clear();
         _closedDates.addAll(nextClosedDates);
+        _closureReasonsByDate = nextClosureReasons;
+        _closuresVerified = true;
+        _closureError = null;
 
         if (!isDateSelectableForBooking(_selectedDate, _closedDates)) {
           _selectedDate = nextAvailableClinicDate(_selectedDate, _closedDates);
         }
+        if (_selectedDate != dateBeforeRefresh) {
+          _visibleMonth = DateTime(_selectedDate.year, _selectedDate.month);
+        }
 
-        _selectedTime = null;
+        _selectedTime = _selectedDate == dateBeforeRefresh
+            ? timeBeforeRefresh
+            : null;
       });
-    } catch (e, st) {
-      debugPrint('CLINIC CLOSURE ERROR: $e');
-      debugPrint('CLINIC CLOSURE STACK: $st');
-
+    } catch (e) {
+      debugPrint(
+        'CLINIC CLOSURE FAILURE: status=$responseStatusCode '
+        'contentType=$responseContentType response=$responseShape '
+        'reason=$failureReason errorType=${e.runtimeType} '
+        'verification=failed',
+      );
       if (!mounted) return;
 
       setState(() {
-        _availabilityError = 'Unable to load clinic closure dates.';
+        _closedDates.clear();
+        _closureReasonsByDate = {};
+        _closuresVerified = false;
+        _closureError = 'Unable to verify clinic closure dates. Try again.';
+        _selectedTime = null;
       });
     } finally {
-      if (mounted && showLoading) {
+      if (mounted) {
         setState(() {
-          _loadingAvailability = false;
+          _loadingClosures = false;
         });
       }
     }
@@ -510,8 +787,30 @@ class _AppointmentSchedulerScreenState
 
   Future<void> _createAppointment() async {
     final appointmentType = (_selectedVisitType ?? '').trim();
+    final requestedDate = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
 
-    if (!isDateSelectableForBooking(_selectedDate, _closedDates)) {
+    if (!_closuresVerified) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Clinic closure dates could not be verified. Please try again.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await _loadClosedDates();
+    if (!mounted) return;
+    if (!canSubmitAppointmentOnDate(
+      requestedDate,
+      _closedDates,
+      closuresVerified: _closuresVerified,
+    )) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -643,7 +942,7 @@ class _AppointmentSchedulerScreenState
         'purpose=$purposeOfVisit',
       );
 
-      final response = await http
+      final response = await _client
           .post(
             uri,
             headers: {
@@ -801,6 +1100,7 @@ class _AppointmentSchedulerScreenState
   @override
   void dispose() {
     _availabilityRefreshTimer?.cancel();
+    if (_ownsClient) _client.close();
 
     super.dispose();
   }
@@ -879,47 +1179,133 @@ class _AppointmentSchedulerScreenState
       elevation: 3,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-        child: CalendarDatePicker(
-          initialDate: _selectedDate,
-          firstDate: today,
-          lastDate: today.add(const Duration(days: 365)),
-          currentDate: today,
-          selectableDayPredicate: (date) {
-            final normalizedDate = DateTime(date.year, date.month, date.day);
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CalendarDatePicker(
+              key: ValueKey(
+                'appointment-calendar-${_formatDate(_selectedDate)}',
+              ),
+              initialDate: _selectedDate,
+              firstDate: today,
+              lastDate: today.add(const Duration(days: 365)),
+              currentDate: today,
+              onDisplayedMonthChanged: (date) {
+                setState(() {
+                  _visibleMonth = DateTime(date.year, date.month);
+                });
+              },
+              selectableDayPredicate: (date) {
+                final normalizedDate = DateTime(
+                  date.year,
+                  date.month,
+                  date.day,
+                );
 
-            return isDateSelectableForBooking(normalizedDate, _closedDates);
-          },
-          onDateChanged: (date) async {
-            final normalizedDate = DateTime(date.year, date.month, date.day);
+                final isCurrentSelection =
+                    normalizedDate.year == _selectedDate.year &&
+                    normalizedDate.month == _selectedDate.month &&
+                    normalizedDate.day == _selectedDate.day;
 
-            if (!isDateSelectableForBooking(normalizedDate, _closedDates)) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'This date is unavailable for booking. Please choose another day.',
+                return isCurrentSelection ||
+                    (_closuresVerified &&
+                        isDateSelectableForBooking(
+                          normalizedDate,
+                          _closedDates,
+                        ));
+              },
+              onDateChanged: (date) async {
+                final normalizedDate = DateTime(
+                  date.year,
+                  date.month,
+                  date.day,
+                );
+
+                if (!_closuresVerified ||
+                    !isDateSelectableForBooking(normalizedDate, _closedDates)) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'This date is unavailable for booking. Please choose another day.',
+                      ),
+                    ),
+                  );
+
+                  return;
+                }
+
+                setState(() {
+                  _selectedDate = normalizedDate;
+                  _selectedTime = null;
+                });
+
+                await _loadBookedSlots();
+              },
+            ),
+            if (_loadingClosures)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text('Verifying clinic closure dates...'),
+              )
+            else if (_closureError != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  _closureError!,
+                  key: const ValueKey('clinic-closure-load-error'),
+                  style: TextStyle(color: Colors.red.shade700),
+                  textAlign: TextAlign.center,
+                ),
+              )
+            else
+              ..._closedDatesInVisibleMonth().map(
+                (date) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${MaterialLocalizations.of(context).formatShortDate(date)} • CLOSED',
+                        key: ValueKey('clinic-closure-${_formatDate(date)}'),
+                        style: const TextStyle(
+                          color: Color(0xFFB3261E),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      for (final reason in _closureReasonsByDate[date] ??
+                          const {'No reason provided.'})
+                        Text(
+                          'Reason: $reason',
+                          key: ValueKey(
+                            'clinic-closure-reason-${_formatDate(date)}-$reason',
+                          ),
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-              );
-
-              return;
-            }
-
-            setState(() {
-              _selectedDate = normalizedDate;
-
-              /*
-              Changing the date always clears
-              the previous selected time.
-              */
-
-              _selectedTime = null;
-            });
-
-            await _loadBookedSlots();
-          },
+              ),
+          ],
         ),
       ),
     );
+  }
+
+  List<DateTime> _closedDatesInVisibleMonth() {
+    final dates =
+        _closedDates
+            .where(
+              (date) =>
+                  date.year == _visibleMonth.year &&
+                  date.month == _visibleMonth.month,
+            )
+            .toList()
+          ..sort((a, b) => a.compareTo(b));
+    return dates;
   }
 
   /*
@@ -962,7 +1348,40 @@ class _AppointmentSchedulerScreenState
 
             const SizedBox(height: 16),
 
-            if (_loadingAvailability)
+            if (_loadingClosures)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(20),
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else if (_closureError != null || !_closuresVerified)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  _closureError ??
+                      'Clinic closure dates could not be verified. Appointment times are unavailable.',
+                  style: TextStyle(color: Colors.red.shade700, fontSize: 13),
+                ),
+              )
+            else if (isClinicClosedDate(_selectedDate, _closedDates))
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text(
+                  'CLOSED — No appointment times are available on this date.',
+                  key: ValueKey('clinic-closed-no-times'),
+                  style: TextStyle(
+                    color: Color(0xFFB3261E),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              )
+            else if (_loadingAvailability)
               const Center(
                 child: Padding(
                   padding: EdgeInsets.all(20),
@@ -1126,7 +1545,9 @@ class _AppointmentSchedulerScreenState
     return SizedBox(
       height: 52,
       child: ElevatedButton(
-        onPressed: _creatingAppointment ? null : _createAppointment,
+        onPressed: _creatingAppointment || !_closuresVerified
+            ? null
+            : _createAppointment,
         style: ElevatedButton.styleFrom(
           backgroundColor: const Color(0xFF0F76FF),
           foregroundColor: Colors.white,

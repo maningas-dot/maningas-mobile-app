@@ -7,9 +7,24 @@ import 'package:http/http.dart' as http;
 import 'constants.dart';
 
 class VerificationPage extends StatefulWidget {
-  final String email;
+  final String? email;
+  final Future<bool> Function(String otp, String email)? onVerifyOtp;
+  final Future<bool> Function(String email)? onResendOtp;
+  final String titleText;
+  final String helperText;
+  final String actionText;
+  final bool allowCancel;
 
-  const VerificationPage({super.key, required this.email});
+  const VerificationPage({
+    super.key,
+    this.email,
+    this.onVerifyOtp,
+    this.onResendOtp,
+    this.titleText = 'Verify Email',
+    this.helperText = 'We sent a 6-digit verification code to:',
+    this.actionText = 'Verify Email',
+    this.allowCancel = true,
+  });
 
   @override
   State<VerificationPage> createState() => _VerificationPageState();
@@ -100,7 +115,28 @@ class _VerificationPageState extends State<VerificationPage> {
     });
 
     try {
+      if (widget.onVerifyOtp != null) {
+        final email = (widget.email ?? '').trim().toLowerCase();
+        final success = await widget.onVerifyOtp!(otp, email);
+
+        if (!mounted) return;
+
+        if (success) {
+          Navigator.of(context).pop(true);
+          return;
+        }
+
+        setState(() {
+          _errorMessage =
+              'Verification failed. Please check the code and try again.';
+        });
+
+        _clearOtp();
+        return;
+      }
+
       final uri = Uri.parse('$apiBaseUrl/api/patients/verify-email');
+      final email = (widget.email ?? '').trim().toLowerCase();
 
       final response = await http
           .post(
@@ -109,10 +145,7 @@ class _VerificationPageState extends State<VerificationPage> {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
             },
-            body: jsonEncode({
-              'email': widget.email.trim().toLowerCase(),
-              'otp': otp,
-            }),
+            body: jsonEncode({'email': email, 'otp': otp}),
           )
           .timeout(const Duration(seconds: 15));
 
@@ -181,7 +214,29 @@ class _VerificationPageState extends State<VerificationPage> {
     });
 
     try {
+      if (widget.onResendOtp != null) {
+        final email = (widget.email ?? '').trim().toLowerCase();
+        final success = await widget.onResendOtp!(email);
+
+        if (!mounted) return;
+
+        if (success) {
+          _clearOtp();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('A new verification code has been sent.'),
+            ),
+          );
+        } else {
+          setState(() {
+            _errorMessage = 'Unable to resend the verification code.';
+          });
+        }
+        return;
+      }
+
       final uri = Uri.parse('$apiBaseUrl/api/patients/resend-verification');
+      final email = (widget.email ?? '').trim().toLowerCase();
 
       final response = await http
           .post(
@@ -190,7 +245,7 @@ class _VerificationPageState extends State<VerificationPage> {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
             },
-            body: jsonEncode({'email': widget.email.trim().toLowerCase()}),
+            body: jsonEncode({'email': email}),
           )
           .timeout(const Duration(seconds: 15));
 
@@ -363,29 +418,42 @@ class _VerificationPageState extends State<VerificationPage> {
                           ),
                         ),
                         const SizedBox(height: 20),
-                        const Text(
-                          'Check your email',
+                        Text(
+                          widget.titleText,
                           textAlign: TextAlign.center,
-                          style: TextStyle(
+                          style: const TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         const SizedBox(height: 10),
-                        const Text(
-                          'We sent a 6-digit verification code to:',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 15, color: Colors.black54),
-                        ),
-                        const SizedBox(height: 6),
                         Text(
-                          widget.email,
+                          widget.helperText,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             fontSize: 15,
-                            fontWeight: FontWeight.w600,
+                            color: Colors.black54,
                           ),
                         ),
+                        const SizedBox(height: 6),
+                        if ((widget.email ?? '').trim().isNotEmpty)
+                          Text(
+                            widget.email!.trim(),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          )
+                        else
+                          const Text(
+                            'your registered email address',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         const SizedBox(height: 26),
                         Wrap(
                           alignment: WrapAlignment.center,
@@ -436,9 +504,9 @@ class _VerificationPageState extends State<VerificationPage> {
                                       color: Colors.white,
                                     ),
                                   )
-                                : const Text(
-                                    'Verify Email',
-                                    style: TextStyle(
+                                : Text(
+                                    widget.actionText,
+                                    style: const TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.w600,
                                     ),
@@ -461,12 +529,13 @@ class _VerificationPageState extends State<VerificationPage> {
                               : const Text('Resend verification code'),
                         ),
                         const SizedBox(height: 4),
-                        TextButton(
-                          onPressed: _isLoading
-                              ? null
-                              : () => Navigator.of(context).pop(false),
-                          child: const Text('Cancel registration'),
-                        ),
+                        if (widget.allowCancel)
+                          TextButton(
+                            onPressed: _isLoading
+                                ? null
+                                : () => Navigator.of(context).pop(false),
+                            child: const Text('Cancel'),
+                          ),
                       ],
                     ),
                   ),

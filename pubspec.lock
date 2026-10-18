@@ -304,6 +304,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.2.2"
+  ph_address_finder:
+    dependency: "direct main"
+    description:
+      name: ph_address_finder
+      sha256: "2c1359f78b3c26eadce33157ebf3c511410af6a65e44f12f99494e9e24a26853"
+      url: "https://pub.dev"
+    source: hosted
+    version: "5.0.1"
   platform:
     dependency: transitive
     description:

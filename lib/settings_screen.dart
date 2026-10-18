@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'app_settings.dart';
 import 'constants.dart';
 import 'terms_and_conditions.dart';
+import 'verification_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final String patientId;
@@ -17,6 +18,9 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const String _passwordChangeUnavailableMessage =
+      'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification. Please contact support or wait for backend support.';
+
   bool _notificationsOn = true;
   bool _emailUpdatesOn = true;
   bool _currentPasswordVisible = false;
@@ -71,9 +75,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  // =========================================================
-  // REQUEST PASSWORD CHANGE OTP
-  // =========================================================
+  String _sanitizeResponseBody(String body) {
+    final trimmed = body.trim();
+
+    if (trimmed.isEmpty) {
+      return '(empty response body)';
+    }
+
+    try {
+      final decoded = jsonDecode(trimmed);
+
+      dynamic redact(dynamic value) {
+        if (value is Map) {
+          final redacted = <String, dynamic>{};
+
+          for (final entry in value.entries) {
+            final key = entry.key.toString().toLowerCase();
+            final safeValue = entry.value;
+
+            if (key.contains('password') ||
+                key.contains('otp') ||
+                key.contains('token') ||
+                key.contains('secret') ||
+                key.contains('authorization') ||
+                key.contains('cookie')) {
+              redacted[entry.key.toString()] = '[REDACTED]';
+            } else if (key.contains('email')) {
+              final rawEmail = safeValue?.toString() ?? '';
+              redacted[entry.key.toString()] = rawEmail.contains('@')
+                  ? rawEmail.replaceFirst(RegExp(r'(^.).*(@.*$)'), r'$1***$2')
+                  : '[REDACTED]';
+            } else {
+              redacted[entry.key.toString()] = redact(safeValue);
+            }
+          }
+
+          return redacted;
+        }
+
+        if (value is List) {
+          return value.map(redact).toList();
+        }
+
+        return value;
+      }
+
+      final sanitized = redact(decoded);
+      return const JsonEncoder.withIndent('  ').convert(sanitized);
+    } catch (_) {
+      if (trimmed.length > 500) {
+        return '${trimmed.substring(0, 500)}...';
+      }
+
+      return trimmed;
+    }
+  }
+
+  Future<bool> _requestPasswordChangeOtp(
+    String patientId,
+    String currentPassword,
+  ) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification.',
+          ),
+        ),
+      );
+    }
+
+    return false;
+  }
+
+  Future<void> _openPasswordVerificationFlow(
+    String patientId,
+    String newPassword,
+  ) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification.',
+          ),
+        ),
+      );
+    }
+  }
 
   Future<void> _savePassword() async {
     final currentPassword = _currentPasswordController.text.trim();
@@ -129,283 +217,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    setState(() {
-      _otpLoading = true;
-    });
-
-    try {
-      final uri = Uri.parse('$apiBaseUrl/api/patients/request-password-change');
-
-      final response = await http
-          .post(
-            uri,
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-            },
-            body: jsonEncode({
-              'patient_id': widget.patientId.trim(),
-              'current_password': currentPassword,
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      Map<String, dynamic> data = {};
-
-      try {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
-        }
-      } catch (_) {
-        data = {};
-      }
-
-      if (!mounted) return;
-
-      if (response.statusCode >= 200 &&
-          response.statusCode < 300 &&
-          data['success'] == true) {
-        setState(() {
-          _otpLoading = false;
-        });
-
-        _showPasswordOtpDialog(widget.patientId.trim(), newPassword);
-      } else {
-        setState(() {
-          _otpLoading = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              data['error']?.toString() ??
-                  data['message']?.toString() ??
-                  'Unable to send verification code.',
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      if (!mounted) return;
-
-      setState(() {
-        _otpLoading = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to connect to the server. Please try again.'),
-        ),
-      );
-    }
-  }
-
-  // =========================================================
-  // OTP VERIFICATION DIALOG
-  // =========================================================
-
-  Future<void> _showPasswordOtpDialog(
-    String patientId,
-    String newPassword,
-  ) async {
-    _otpController.clear();
-
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        bool verifying = false;
-
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Verify Password Change'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'A 6-digit verification code has been sent to your registered email address.',
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _otpController,
-                    keyboardType: TextInputType.number,
-                    textInputAction: TextInputAction.done,
-                    maxLength: 6,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 4,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Verification Code',
-                      hintText: '000000',
-                      border: OutlineInputBorder(),
-                      counterText: '',
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: verifying
-                      ? null
-                      : () {
-                          Navigator.of(dialogContext).pop();
-                        },
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: verifying
-                      ? null
-                      : () async {
-                          final otp = _otpController.text.trim();
-
-                          if (!RegExp(r'^\d{6}$').hasMatch(otp)) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Enter the 6-digit verification code.',
-                                ),
-                              ),
-                            );
-                            return;
-                          }
-
-                          setDialogState(() {
-                            verifying = true;
-                          });
-
-                          final success = await _confirmPasswordChange(
-                            patientId,
-                            newPassword,
-                            otp,
-                          );
-
-                          if (!mounted) return;
-
-                          if (success) {
-                            Navigator.of(dialogContext).pop();
-                          } else {
-                            setDialogState(() {
-                              verifying = false;
-                            });
-                          }
-                        },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0F76FF),
-                    foregroundColor: Colors.white,
-                  ),
-                  child: verifying
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text('Verify'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
     if (mounted) {
-      _otpController.clear();
-    }
-  }
-
-  // =========================================================
-  // CONFIRM PASSWORD CHANGE
-  // =========================================================
-
-  Future<bool> _confirmPasswordChange(
-    String patientId,
-    String newPassword,
-    String otp,
-  ) async {
-    try {
-      final uri = Uri.parse('$apiBaseUrl/api/patients/confirm-password-change');
-
-      final response = await http
-          .post(
-            uri,
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-            },
-            body: jsonEncode({
-              'patient_id': patientId,
-              'otp': otp,
-              'new_password': newPassword,
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      Map<String, dynamic> data = {};
-
-      try {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
-        }
-      } catch (_) {
-        data = {};
-      }
-
-      if (!mounted) return false;
-
-      if (response.statusCode >= 200 &&
-          response.statusCode < 300 &&
-          data['success'] == true) {
-        _currentPasswordController.clear();
-        _newPasswordController.clear();
-        _confirmPasswordController.clear();
-        _otpController.clear();
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              data['message']?.toString() ?? 'Password changed successfully.',
-            ),
-            backgroundColor: Colors.green,
-          ),
-        );
-
-        return true;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            data['error']?.toString() ??
-                data['message']?.toString() ??
-                'Invalid verification code.',
-          ),
-        ),
-      );
-
-      return false;
-    } catch (_) {
-      if (!mounted) return false;
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Unable to connect to the server. Please try again.'),
+          content: Text(
+            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification. Please contact support or wait for backend support.',
+          ),
         ),
       );
-
-      return false;
     }
+
+    return;
   }
 
   void _openTermsAndConditions() {
@@ -614,6 +436,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       width: double.infinity,
                       height: 48,
                       child: ElevatedButton(
+                        key: const ValueKey('continuePasswordButton'),
                         onPressed: _otpLoading ? null : _savePassword,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF0F76FF),
