@@ -246,6 +246,7 @@ class NotificationController extends ChangeNotifier {
 
   Future<void> clear() async {
     _notifications = [];
+    _patientId = null;
     notifyListeners();
   }
 }

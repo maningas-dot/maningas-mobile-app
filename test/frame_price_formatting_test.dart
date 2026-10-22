@@ -81,7 +81,7 @@ void main() {
             const MaterialApp(home: DashboardScreen(profileData: {})),
           );
           await tester.pumpAndSettle();
-          await tester.tap(find.text('Frames').last);
+          await tester.tap(find.text('Explore Frames').last);
           await tester.pumpAndSettle();
 
           expect(find.text('₱125,000.50'), findsOneWidget);

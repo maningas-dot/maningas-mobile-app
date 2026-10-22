@@ -3,7 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:optcare_app/app_notifications.dart';
 import 'package:optcare_app/main.dart';
+import 'package:optcare_app/services/patient_session_service.dart';
 
 void main() {
   const patientId = 'synthetic-confirmation-patient';
@@ -90,50 +92,79 @@ void main() {
   testWidgets(
     'logout cancellation stays authenticated and confirmation logs out',
     (tester) async {
-      await http.runWithClient(() async {
-        await tester.pumpWidget(
-          const MaterialApp(
-            home: DashboardScreen(profileData: {'patient_id': patientId}),
-          ),
-        );
-        await tester.pumpAndSettle();
+      final tokenStorage = _MemoryTokenStorage()..value = 'synthetic-jwt';
+      final sessionService = PatientSessionService(
+        client: MockClient((_) async => http.Response('{}', 200)),
+        tokenStorage: tokenStorage,
+        baseUrl: 'https://api.example.test',
+      );
+      var markReadRequests = 0;
+      await http.runWithClient(
+        () async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: DashboardScreen(
+                profileData: const {'patient_id': patientId},
+                sessionService: sessionService,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await notificationsController.markAllAsRead();
+          expect(markReadRequests, 1);
 
-        await tester.tap(
-          find.descendant(
-            of: find.byType(BottomNavigationBar),
-            matching: find.text('My Appointments'),
-          ),
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('Logout'));
-        await tester.pumpAndSettle();
+          await tester.tap(
+            find.descendant(
+              of: find.byType(BottomNavigationBar),
+              matching: find.text('My Appointments'),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.byTooltip('Logout'));
+          await tester.pumpAndSettle();
 
-        expect(find.text('Are you sure you want to log out?'), findsOneWidget);
-        expect(
-          find.text('You will need to log in again to access your account.'),
-          findsOneWidget,
-        );
-        await tester.tap(find.text('Cancel'));
-        await tester.pumpAndSettle();
+          expect(
+            find.text('Are you sure you want to log out?'),
+            findsOneWidget,
+          );
+          expect(
+            find.text('You will need to log in again to access your account.'),
+            findsOneWidget,
+          );
+          await tester.tap(find.text('Cancel'));
+          await tester.pumpAndSettle();
 
-        expect(find.byType(AlertDialog), findsNothing);
-        expect(find.byType(BottomNavigationBar), findsOneWidget);
-        expect(
-          tester
-              .widget<BottomNavigationBar>(find.byType(BottomNavigationBar))
-              .currentIndex,
-          2,
-        );
-        expect(find.text('My Appointments'), findsWidgets);
+          expect(find.byType(AlertDialog), findsNothing);
+          expect(find.byType(BottomNavigationBar), findsOneWidget);
+          expect(
+            tester
+                .widget<BottomNavigationBar>(find.byType(BottomNavigationBar))
+                .currentIndex,
+            2,
+          );
+          expect(find.text('My Appointments'), findsWidgets);
 
-        await tester.tap(find.byTooltip('Logout'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Yes, Log Out'));
-        await tester.pumpAndSettle();
+          await tester.tap(find.byTooltip('Logout'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Yes, Log Out'));
+          await tester.pumpAndSettle();
 
-        expect(find.byType(BottomNavigationBar), findsNothing);
-        expect(find.text('Login'), findsOneWidget);
-      }, () => MockClient(_mockResponse(patientId)));
+          expect(find.byType(BottomNavigationBar), findsNothing);
+          expect(find.text('Login'), findsOneWidget);
+          expect(tokenStorage.value, isNull);
+          markReadRequests = 0;
+          await notificationsController.markAllAsRead();
+          expect(markReadRequests, 0);
+        },
+        () => MockClient((request) async {
+          if (request.url.path.endsWith('/read-all')) {
+            markReadRequests++;
+            return http.Response('{}', 200);
+          }
+          return _mockResponse(patientId)(request);
+        }),
+      );
+      sessionService.close();
     },
   );
 }
@@ -145,4 +176,21 @@ Future<http.Response> Function(http.Request) _mockResponse(String patientId) {
     }
     return http.Response('[]', 200);
   };
+}
+
+class _MemoryTokenStorage implements PatientTokenStorage {
+  String? value;
+
+  @override
+  Future<void> deleteToken() async {
+    value = null;
+  }
+
+  @override
+  Future<String?> readToken() async => value;
+
+  @override
+  Future<void> writeToken(String token) async {
+    value = token;
+  }
 }

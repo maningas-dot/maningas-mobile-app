@@ -9,6 +9,229 @@ import 'package:optcare_app/constants.dart';
 import 'package:optcare_app/main.dart';
 
 void main() {
+  test('clinic clock converts UTC to Philippine local time', () {
+    expect(
+      appointmentClinicLocalNow(utcNow: DateTime.utc(2026, 10, 21, 13, 52)),
+      DateTime.utc(2026, 10, 21, 21, 52),
+    );
+    expect(
+      appointmentClinicLocalNow(utcNow: DateTime.utc(2026, 10, 21, 16, 30)),
+      DateTime.utc(2026, 10, 22, 0, 30),
+    );
+  });
+
+  test('appointment slots are offered every half hour through 17:30', () {
+    final slots = generateAppointmentTimeSlots();
+
+    expect(slots, hasLength(20));
+    expect(slots.first, const TimeOfDay(hour: 8, minute: 0));
+    expect(slots.last, const TimeOfDay(hour: 17, minute: 30));
+    for (var index = 1; index < slots.length; index++) {
+      final previous = slots[index - 1].hour * 60 + slots[index - 1].minute;
+      final current = slots[index].hour * 60 + slots[index].minute;
+      expect(current - previous, 30);
+    }
+  });
+
+  test('booking dates enforce local past and 365-day boundaries', () {
+    final now = DateTime(2026, 10, 5, 12);
+
+    expect(isDateWithinBookingWindow(DateTime(2026, 10, 4), now: now), isFalse);
+    expect(isDateWithinBookingWindow(DateTime(2026, 10, 5), now: now), isTrue);
+    expect(isDateWithinBookingWindow(DateTime(2027, 10, 5), now: now), isTrue);
+    expect(isDateWithinBookingWindow(DateTime(2027, 10, 6), now: now), isFalse);
+    expect(
+      isDateSelectableForBooking(DateTime(2026, 10, 11), {}, now: now),
+      isFalse,
+    );
+  });
+
+  test('clinic closures disable dates and inclusive range endpoints', () {
+    final now = DateTime(2026, 10, 5);
+    final closures = parseClinicClosureDates([
+      {'start_date': '2026-10-06', 'end_date': '2026-10-07'},
+    ]);
+
+    expect(
+      isDateSelectableForBooking(DateTime(2026, 10, 6), closures, now: now),
+      isFalse,
+    );
+    expect(
+      isDateSelectableForBooking(DateTime(2026, 10, 7), closures, now: now),
+      isFalse,
+    );
+    expect(
+      isDateSelectableForBooking(DateTime(2026, 10, 8), closures, now: now),
+      isTrue,
+    );
+  });
+
+  test('today cutoff closes slots 20 minutes or less away', () {
+    final today = DateTime(2026, 10, 5);
+
+    expect(
+      isAppointmentSlotWithinBookingCutoff(
+        today,
+        const TimeOfDay(hour: 8, minute: 0),
+        now: DateTime(2026, 10, 5, 7, 40),
+      ),
+      isTrue,
+    );
+    expect(
+      isAppointmentSlotWithinBookingCutoff(
+        today,
+        const TimeOfDay(hour: 8, minute: 0),
+        now: DateTime(2026, 10, 5, 7, 39),
+      ),
+      isFalse,
+    );
+    expect(
+      isAppointmentSlotWithinBookingCutoff(
+        today.add(const Duration(days: 1)),
+        const TimeOfDay(hour: 8, minute: 0),
+        now: DateTime(2026, 10, 5, 7, 59),
+      ),
+      isFalse,
+    );
+  });
+
+  test(
+    'active and Requested appointments block while terminal states do not',
+    () {
+      for (final status in [' Requested ', 'Pending', 'Confirmed']) {
+        expect(isAppointmentStatusBlocking(status), isTrue);
+      }
+      for (final status in [
+        'cancelled',
+        ' CANCELED ',
+        'Rejected',
+        ' DECLINED ',
+      ]) {
+        expect(isAppointmentStatusBlocking(status), isFalse);
+      }
+    },
+  );
+
+  test('a date is fully unavailable only when every slot is blocked', () {
+    final date = DateTime(2026, 10, 6);
+    final now = DateTime(2026, 10, 5, 12);
+    final booked = {
+      for (final time in generateAppointmentTimeSlots())
+        appointmentSlotKey(date, time),
+    };
+
+    expect(isAppointmentDateFullyUnavailable(date, booked, now: now), isTrue);
+    booked.remove(
+      appointmentSlotKey(date, const TimeOfDay(hour: 17, minute: 30)),
+    );
+    expect(isAppointmentDateFullyUnavailable(date, booked, now: now), isFalse);
+  });
+
+  test(
+    'today at 9:52 PM is unavailable and has no available afternoon slots',
+    () {
+      final today = DateTime(2026, 10, 21);
+      final now = DateTime(2026, 10, 21, 21, 52);
+      final booked = <String>{};
+
+      expect(
+        isAppointmentDateFullyUnavailable(today, booked, now: now),
+        isTrue,
+      );
+      for (final time in [
+        const TimeOfDay(hour: 15, minute: 0),
+        const TimeOfDay(hour: 17, minute: 0),
+        const TimeOfDay(hour: 17, minute: 30),
+      ]) {
+        expect(
+          isAppointmentSlotAvailable(today, time, booked, now: now),
+          isFalse,
+        );
+      }
+    },
+  );
+
+  test(
+    'at 5 PM the 20-minute cutoff is shared by slot and date availability',
+    () {
+      final today = DateTime(2026, 10, 21);
+      final now = DateTime(2026, 10, 21, 17);
+      final booked = <String>{};
+
+      expect(
+        isAppointmentSlotAvailable(
+          today,
+          const TimeOfDay(hour: 17, minute: 0),
+          booked,
+          now: now,
+        ),
+        isFalse,
+      );
+
+      expect(
+        isAppointmentSlotAvailable(
+          today,
+          const TimeOfDay(hour: 17, minute: 30),
+          booked,
+          now: now,
+        ),
+        isTrue,
+      );
+      expect(
+        isAppointmentDateFullyUnavailable(today, booked, now: now),
+        isFalse,
+      );
+    },
+  );
+
+  test('at 4:50 PM the 5 PM slot is unavailable at the 20-minute cutoff', () {
+    final today = DateTime(2026, 10, 21);
+    expect(
+      isAppointmentSlotAvailable(
+        today,
+        const TimeOfDay(hour: 17, minute: 0),
+        {},
+        now: DateTime(2026, 10, 21, 16, 50),
+      ),
+      isFalse,
+    );
+  });
+
+  test('today stays selectable when one slot remains available', () {
+    final today = DateTime(2026, 10, 21);
+    final now = DateTime(2026, 10, 21, 16, 30);
+
+    expect(isAppointmentDateFullyUnavailable(today, {}, now: now), isFalse);
+    expect(
+      isAppointmentSlotAvailable(
+        today,
+        const TimeOfDay(hour: 17, minute: 30),
+        {},
+        now: now,
+      ),
+      isTrue,
+    );
+  });
+
+  test('reserved slots use the same date and submission availability rule', () {
+    final date = DateTime(2026, 10, 21);
+    const slot = TimeOfDay(hour: 17, minute: 30);
+    final now = DateTime(2026, 10, 21, 16);
+    final booked = {appointmentSlotKey(date, slot)};
+
+    expect(isAppointmentSlotAvailable(date, slot, booked, now: now), isFalse);
+    expect(isAppointmentDateFullyUnavailable(date, booked, now: now), isFalse);
+
+    final allBooked = {
+      for (final time in generateAppointmentTimeSlots())
+        appointmentSlotKey(date, time),
+    };
+    expect(
+      isAppointmentDateFullyUnavailable(date, allBooked, now: now),
+      isTrue,
+    );
+  });
+
   test('Appointments are only available Monday to Saturday', () {
     expect(isClinicOpenDay(DateTime(2026, 10, 5)), isTrue);
     expect(isClinicOpenDay(DateTime(2026, 10, 10)), isTrue);
@@ -19,19 +242,32 @@ void main() {
     'Closure dates are blocked even when they are otherwise weekday open days',
     () {
       final closedDates = {DateTime(2026, 10, 8), DateTime(2026, 10, 9)};
+      final now = DateTime(2026, 10, 1);
 
       expect(isClinicOpenDay(DateTime(2026, 10, 8)), isTrue);
       expect(isClinicClosedDate(DateTime(2026, 10, 8), closedDates), isTrue);
       expect(
-        isDateSelectableForBooking(DateTime(2026, 10, 8), closedDates),
+        isDateSelectableForBooking(
+          DateTime(2026, 10, 8),
+          closedDates,
+          now: now,
+        ),
         isFalse,
       );
       expect(
-        isDateSelectableForBooking(DateTime(2026, 10, 7), closedDates),
+        isDateSelectableForBooking(
+          DateTime(2026, 10, 7),
+          closedDates,
+          now: now,
+        ),
         isTrue,
       );
       expect(
-        isDateSelectableForBooking(DateTime(2026, 10, 11), closedDates),
+        isDateSelectableForBooking(
+          DateTime(2026, 10, 11),
+          closedDates,
+          now: now,
+        ),
         isFalse,
       );
     },
@@ -126,24 +362,25 @@ void main() {
   });
 
   test('Ranges block their inclusive dates but not adjacent open dates', () {
+    final now = DateTime(2026, 10, 1);
     final closedDates = parseClinicClosureDates([
       {'start_date': '2026-10-05', 'end_date': '2026-10-06'},
     ]);
 
     expect(
-      isDateSelectableForBooking(DateTime(2026, 10, 3), closedDates),
+      isDateSelectableForBooking(DateTime(2026, 10, 3), closedDates, now: now),
       isTrue,
     );
     expect(
-      isDateSelectableForBooking(DateTime(2026, 10, 5), closedDates),
+      isDateSelectableForBooking(DateTime(2026, 10, 5), closedDates, now: now),
       isFalse,
     );
     expect(
-      isDateSelectableForBooking(DateTime(2026, 10, 6), closedDates),
+      isDateSelectableForBooking(DateTime(2026, 10, 6), closedDates, now: now),
       isFalse,
     );
     expect(
-      isDateSelectableForBooking(DateTime(2026, 10, 7), closedDates),
+      isDateSelectableForBooking(DateTime(2026, 10, 7), closedDates, now: now),
       isTrue,
     );
   });
@@ -213,17 +450,28 @@ void main() {
   test('Booking submission requires verified closures and an open date', () {
     final closure = DateTime(2026, 10, 8);
     final openDay = DateTime(2026, 10, 7);
+    final now = DateTime(2026, 10, 1);
 
     expect(
-      canSubmitAppointmentOnDate(closure, {closure}, closuresVerified: true),
+      canSubmitAppointmentOnDate(
+        closure,
+        {closure},
+        closuresVerified: true,
+        now: now,
+      ),
       isFalse,
     );
     expect(
-      canSubmitAppointmentOnDate(openDay, {}, closuresVerified: false),
+      canSubmitAppointmentOnDate(
+        openDay,
+        {},
+        closuresVerified: false,
+        now: now,
+      ),
       isFalse,
     );
     expect(
-      canSubmitAppointmentOnDate(openDay, {}, closuresVerified: true),
+      canSubmitAppointmentOnDate(openDay, {}, closuresVerified: true, now: now),
       isTrue,
     );
     expect(
@@ -231,6 +479,7 @@ void main() {
         DateTime(2026, 10, 11),
         {},
         closuresVerified: true,
+        now: now,
       ),
       isFalse,
     );
@@ -629,6 +878,405 @@ void main() {
     client.close();
   });
 
+  testWidgets('failed appointment availability shows retry and no slots', (
+    tester,
+  ) async {
+    var availabilityRequests = 0;
+    final now = DateTime(2026, 10, 5, 7);
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments') {
+        availabilityRequests++;
+        return availabilityRequests == 1
+            ? _jsonResponse(503, {'error': 'Unavailable.'})
+            : _jsonResponse(200, []);
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(
+      find.text('Unable to load available appointment times.'),
+      findsOneWidget,
+    );
+    expect(find.text('8:00 AM'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('retry-appointment-availability')),
+      findsOneWidget,
+    );
+
+    final retryButton = find.byKey(
+      const ValueKey('retry-appointment-availability'),
+    );
+    await tester.ensureVisible(retryButton);
+    await tester.tap(retryButton);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(availabilityRequests, 2);
+    expect(find.text('8:00 AM'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets('resuming after clinic hours recalculates date and slot states', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 10, 21, 16);
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments') {
+        return _jsonResponse(200, []);
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    final calendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    final today = DateTime(2026, 10, 21);
+    expect(calendar.selectableDayPredicate!(today), isTrue);
+    expect(find.text('Available'), findsWidgets);
+
+    now = DateTime(2026, 10, 21, 21, 52);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final resumedCalendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    expect(resumedCalendar.selectableDayPredicate!(today), isFalse);
+    expect(find.text('3:00 PM'), findsOneWidget);
+    expect(find.text('Booking Closed'), findsNWidgets(20));
+    expect(find.text('Available'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets('at 9:52 PM today is disabled and no slot is available', (
+    tester,
+  ) async {
+    final now = DateTime(2026, 10, 21, 21, 52);
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments') {
+        return _jsonResponse(200, []);
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final calendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    final today = DateTime(2026, 10, 21);
+    expect(calendar.selectableDayPredicate!(today), isFalse);
+    expect(calendar.initialDate, isNull);
+
+    final semantics = tester.ensureSemantics();
+    final dateFinder = find.bySemanticsLabel(RegExp('October 21, 2026'));
+    expect(dateFinder, findsOneWidget);
+    final dateSemantics = tester.getSemantics(dateFinder);
+    expect(
+      dateSemantics.flagsCollection.isEnabled.toString(),
+      'Tristate.isFalse',
+    );
+    expect(
+      dateSemantics.flagsCollection.isSelected.toString(),
+      isNot('Tristate.isTrue'),
+    );
+
+    for (final label in [
+      '3:00 PM',
+      '3:30 PM',
+      '4:00 PM',
+      '4:30 PM',
+      '5:00 PM',
+      '5:30 PM',
+    ]) {
+      final slot = tester.widget<OutlinedButton>(
+        find.ancestor(
+          of: find.text(label),
+          matching: find.byType(OutlinedButton),
+        ),
+      );
+      expect(slot.onPressed, isNull, reason: '$label must be unavailable');
+    }
+    expect(find.text('Booking Closed'), findsNWidgets(20));
+    expect(find.text('Available'), findsNothing);
+
+    await tester.ensureVisible(find.text('Confirm Appointment'));
+    await tester.tap(find.text('Confirm Appointment'));
+    await tester.pump();
+    expect(
+      find.text('Please select an available appointment time.'),
+      findsOneWidget,
+    );
+
+    semantics.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets('a fully reserved date is disabled by the rendered calendar', (
+    tester,
+  ) async {
+    final now = DateTime(2026, 10, 21, 8);
+    final fullyReservedDate = DateTime(2026, 10, 22);
+    final appointments = [
+      for (final time in generateAppointmentTimeSlots())
+        {
+          'appointment_date': _formatDate(fullyReservedDate),
+          'appointment_time':
+              '${time.hour.toString().padLeft(2, '0')}:'
+              '${time.minute.toString().padLeft(2, '0')}:00',
+          'appointment_status': 'Requested',
+        },
+    ];
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments') {
+        return _jsonResponse(200, appointments);
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final calendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    expect(calendar.selectableDayPredicate!(fullyReservedDate), isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets(
+    'submission rejects a selected slot after clinic-local time advances',
+    (tester) async {
+      var now = DateTime(2026, 10, 21, 16, 30);
+      var appointmentPosts = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments' &&
+            request.method == 'GET') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments' &&
+            request.method == 'POST') {
+          appointmentPosts++;
+          return _jsonResponse(201, {'success': true});
+        }
+        return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => now,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      final calendar = tester.widget<CalendarDatePicker>(
+        find.byType(CalendarDatePicker),
+      );
+      calendar.onDateChanged(DateTime(2026, 10, 21));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final lastSlot = find.text('5:30 PM');
+      await tester.ensureVisible(lastSlot);
+      await tester.tap(lastSlot);
+      await tester.pump();
+      await tester.ensureVisible(find.text('Confirm Appointment'));
+
+      now = DateTime(2026, 10, 21, 21, 52);
+      await tester.tap(find.text('Confirm Appointment'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(appointmentPosts, 0);
+      expect(
+        find.text(
+          'That appointment time is no longer available. Please choose another time.',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
+
+  testWidgets('submission refresh blocks a slot newly occupied by Requested', (
+    tester,
+  ) async {
+    final now = DateTime(2026, 10, 5, 7);
+    final selectedDate = DateTime(2026, 10, 6);
+    var availabilityRequests = 0;
+    var appointmentPosts = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments' && request.method == 'GET') {
+        availabilityRequests++;
+        return _jsonResponse(
+          200,
+          availabilityRequests >= 3
+              ? [
+                  {
+                    'appointment_date': _formatDate(selectedDate),
+                    'appointment_time': '08:00:00',
+                    'appointment_status': ' Requested ',
+                  },
+                ]
+              : [],
+        );
+      }
+      if (request.url.path == '/api/appointments' && request.method == 'POST') {
+        appointmentPosts++;
+        return _jsonResponse(201, {'success': true});
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await _prepareAppointmentSubmission(tester, selectedDate);
+    await tester.ensureVisible(find.text('Confirm Appointment'));
+    await tester.tap(find.text('Confirm Appointment'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(availabilityRequests, greaterThanOrEqualTo(3));
+    expect(appointmentPosts, 0);
+    expect(
+      find.text(
+        'That appointment slot is already reserved. Please choose another time.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets('HTTP 409 shows conflict and refreshes availability', (
+    tester,
+  ) async {
+    final now = DateTime(2026, 10, 5, 7);
+    final selectedDate = DateTime(2026, 10, 6);
+    var availabilityRequests = 0;
+    var appointmentPosts = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments' && request.method == 'GET') {
+        availabilityRequests++;
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments' && request.method == 'POST') {
+        appointmentPosts++;
+        return _jsonResponse(409, {'error': 'The slot was taken.'});
+      }
+      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => now,
+        ),
+      ),
+    );
+    await _prepareAppointmentSubmission(tester, selectedDate);
+    await tester.ensureVisible(find.text('Confirm Appointment'));
+    await tester.tap(find.text('Confirm Appointment'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(appointmentPosts, 1);
+    expect(availabilityRequests, greaterThanOrEqualTo(4));
+    expect(find.text('The slot was taken.'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
   test('Date of birth must be within the 1926 to 2016 registration range', () {
     expect(isValidDateOfBirth(DateTime(1926, 1, 1)), isTrue);
     expect(isValidDateOfBirth(DateTime(2016, 12, 31)), isTrue);
@@ -653,6 +1301,29 @@ void main() {
       equals('+639123456789'),
     );
   });
+}
+
+Future<void> _prepareAppointmentSubmission(
+  WidgetTester tester,
+  DateTime selectedDate,
+) async {
+  final calendar = tester.widget<CalendarDatePicker>(
+    find.byType(CalendarDatePicker),
+  );
+  calendar.onDateChanged(selectedDate);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 100));
+
+  final firstSlot = find.text('8:00 AM');
+  await tester.ensureVisible(firstSlot);
+  await tester.tap(firstSlot);
+  await tester.pump();
+  final visitType = find.byType(DropdownButtonFormField<String>);
+  await tester.ensureVisible(visitType);
+  await tester.tap(visitType);
+  await tester.pump();
+  await tester.tap(find.text('Eye Examination').last);
+  await tester.pump();
 }
 
 http.Response _jsonResponse(int statusCode, Object body) => http.Response(

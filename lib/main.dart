@@ -18,9 +18,11 @@ import 'transaction_history_screen.dart';
 import 'philippine_address_helper.dart';
 import 'zip_code_lookup.dart';
 import 'forgot_password_screen.dart';
+import 'services/patient_session_service.dart';
+import 'support_service_preview.dart' show SupportServiceScreen;
 
 class Main {
-  static const String baseUrl = 'https://gonzalesvisionclinic.onrender.com';
+  static const String baseUrl = 'https://api.gonzalesvisionclinic.com';
 }
 
 const Map<String, String> jsonHeaders = {
@@ -64,6 +66,29 @@ Map<String, dynamic> nameFieldsFromLoginResponse(Map<String, dynamic> data) {
     }
   }
   return fields;
+}
+
+Map<String, dynamic> _profileDataFromPatient(Map<String, dynamic> patient) {
+  final data = patientProfileFromResponse(patient);
+  final patientId = data['patient_id'] ?? data['user_id'] ?? data['id'];
+  if (patientId == null || patientId.toString().trim().isEmpty) {
+    throw const FormatException('Patient information is incomplete.');
+  }
+
+  return {
+    'patient_id': patientId,
+    'email': data['email'] ?? '',
+    'email_verified': data['email_verified'] ?? true,
+    ...nameFieldsFromLoginResponse(data),
+    'contact_number':
+        data['contact_number'] ?? data['contact'] ?? data['phone'] ?? '',
+    'address': data['address'] ?? '',
+    ...structuredAddressFieldsFromLoginResponse(data),
+    'gender': data['gender'] ?? 'Male',
+    'date_of_birth': data['date_of_birth'] ?? data['dob'] ?? data['birth_date'],
+    'age': data['age'],
+    'created_at': data['created_at'] ?? data['registered_at'] ?? '',
+  };
 }
 
 Map<String, dynamic> mergeProfileRefreshData(
@@ -277,15 +302,156 @@ class _MyAppState extends State<MyApp> {
               child: child ?? const SizedBox.shrink(),
             );
           },
-          home: const AuthScreen(),
+          home: const SessionStartupScreen(),
         );
       },
     );
   }
 }
 
+class SessionStartupScreen extends StatefulWidget {
+  const SessionStartupScreen({super.key, this.sessionService});
+
+  final PatientSessionService? sessionService;
+
+  @override
+  State<SessionStartupScreen> createState() => _SessionStartupScreenState();
+}
+
+class _SessionStartupScreenState extends State<SessionStartupScreen> {
+  late final PatientSessionService _sessionService =
+      widget.sessionService ?? patientSessionService;
+  Map<String, dynamic>? _profile;
+  PatientSessionRestoreResult? _restoreFailure;
+  bool _checkingSession = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreSession();
+  }
+
+  Future<void> _restoreSession() async {
+    setState(() {
+      _checkingSession = true;
+      _restoreFailure = null;
+    });
+    final result = await _sessionService.restoreRememberedSession();
+    if (!mounted) return;
+
+    switch (result.status) {
+      case PatientSessionRestoreStatus.authenticated:
+        setState(() {
+          _profile = _profileDataFromPatient(result.patient!);
+          _checkingSession = false;
+        });
+        return;
+      case PatientSessionRestoreStatus.retryableFailure:
+        setState(() {
+          _restoreFailure = result;
+          _checkingSession = false;
+        });
+        return;
+      case PatientSessionRestoreStatus.verificationRequired:
+        setState(() => _checkingSession = false);
+        final email = (result.email ?? '').trim();
+        if (email.isNotEmpty) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _openVerification(email);
+          });
+        }
+        return;
+      case PatientSessionRestoreStatus.noRememberedSession:
+      case PatientSessionRestoreStatus.invalidSession:
+        setState(() => _checkingSession = false);
+        return;
+    }
+  }
+
+  Future<void> _openVerification(String email) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => VerificationPage(
+          email: email,
+          titleText: 'Verify Email',
+          helperText: 'Complete email verification to continue signing in:',
+        ),
+      ),
+    );
+  }
+
+  void _onAuthenticated(Map<String, dynamic> profile) {
+    setState(() {
+      _profile = profile;
+      _restoreFailure = null;
+    });
+  }
+
+  Future<void> _onLogout() async {
+    setState(() {
+      _profile = null;
+      _restoreFailure = null;
+      _checkingSession = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_profile case final profile?) {
+      return DashboardScreen(
+        profileData: profile,
+        sessionService: _sessionService,
+        onLogout: _onLogout,
+      );
+    }
+
+    if (_checkingSession) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    final failure = _restoreFailure;
+    if (failure != null) {
+      return Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    failure.message ?? 'Unable to validate your saved sign-in.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: _restoreSession,
+                    child: const Text('Retry'),
+                  ),
+                  TextButton(
+                    onPressed: () => setState(() => _restoreFailure = null),
+                    child: const Text('Sign in instead'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return AuthScreen(
+      sessionService: _sessionService,
+      onAuthenticated: _onAuthenticated,
+    );
+  }
+}
+
 class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
+  const AuthScreen({super.key, this.sessionService, this.onAuthenticated});
+
+  final PatientSessionService? sessionService;
+  final ValueChanged<Map<String, dynamic>>? onAuthenticated;
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -336,7 +502,10 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _isLogin = true;
   bool _isLoading = false;
   bool _acceptedTerms = false;
+  bool _rememberMe = false;
   String? _lastAutoFilledZipCode;
+  late final PatientSessionService _sessionService =
+      widget.sessionService ?? patientSessionService;
 
   Future<void> _syncZipCodeFromSelection({
     required String province,
@@ -636,113 +805,25 @@ class _AuthScreenState extends State<AuthScreen> {
       // =====================================================
 
       if (_isLogin) {
-        final loginEmail = _emailController.text.trim().toLowerCase();
-
-        final payload = {
-          'email': loginEmail,
-          'password': _passwordController.text,
-        };
-
-        final response = await http
-            .post(uri, headers: jsonHeaders, body: jsonEncode(payload))
-            .timeout(const Duration(seconds: 15));
-
-        Map<String, dynamic> data = {};
-
-        try {
-          final decoded = jsonDecode(response.body);
-
-          if (decoded is Map<String, dynamic>) {
-            data = decoded;
-          }
-        } catch (_) {
-          data = {};
-        }
-
-        debugPrint('LOGIN STATUS: ${response.statusCode}');
-
+        final result = await _sessionService.login(
+          email: _emailController.text,
+          password: _passwordController.text,
+          rememberMe: _rememberMe,
+        );
         if (!mounted) return;
-
-        // =================================================
-        // EMAIL VERIFICATION REQUIRED
-        // =================================================
-
-        if (response.statusCode == 403 &&
-            data['code']?.toString() == 'EMAIL_VERIFICATION_REQUIRED') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'This email still needs verification. Please complete registration verification first.',
+        final profileData = _profileDataFromPatient(result.patient);
+        final onAuthenticated = widget.onAuthenticated;
+        if (onAuthenticated != null) {
+          onAuthenticated(profileData);
+        } else {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => DashboardScreen(
+                profileData: profileData,
+                sessionService: _sessionService,
               ),
             ),
           );
-
-          return;
-        }
-
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(data['message']?.toString() ?? 'Login successful'),
-            ),
-          );
-
-          // =================================================
-          // BACKEND RETURNS THE PATIENT DIRECTLY
-          // =================================================
-
-          final profileData = <String, dynamic>{};
-
-          profileData['patient_id'] =
-              data['patient_id'] ?? data['user_id'] ?? data['id'] ?? '';
-
-          profileData['email'] = data['email'] ?? '';
-
-          profileData['email_verified'] = data['email_verified'] ?? true;
-
-          profileData.addAll(nameFieldsFromLoginResponse(data));
-
-          profileData['contact_number'] =
-              data['contact_number'] ?? data['contact'] ?? data['phone'] ?? '';
-
-          profileData['address'] = data['address'] ?? '';
-          profileData.addAll(structuredAddressFieldsFromLoginResponse(data));
-
-          final rawAddress = data['address'];
-
-          debugPrint(
-            'LOGIN ADDRESS DIAGNOSTIC: '
-            'type=${rawAddress.runtimeType}, '
-            'isMap=${rawAddress is Map}, '
-            'keys=${rawAddress is Map ? rawAddress.keys.toList() : const []}',
-          );
-
-          profileData['gender'] = data['gender'] ?? 'Male';
-
-          profileData['date_of_birth'] =
-              data['date_of_birth'] ?? data['dob'] ?? data['birth_date'];
-
-          profileData['age'] = data['age'];
-
-          profileData['created_at'] =
-              data['created_at'] ?? data['registered_at'] ?? '';
-
-          // =================================================
-          // OPEN DASHBOARD
-          // =================================================
-
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(
-              builder: (_) => DashboardScreen(profileData: profileData),
-            ),
-          );
-        } else {
-          final msg =
-              (data['message'] ?? data['error'])?.toString() ?? 'Login failed';
-
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(msg)));
         }
       }
       // =====================================================
@@ -937,6 +1018,20 @@ class _AuthScreenState extends State<AuthScreen> {
           ).showSnackBar(SnackBar(content: Text(msg)));
         }
       }
+    } on PatientEmailVerificationRequired {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This email still needs verification. Please complete registration verification first.',
+          ),
+        ),
+      );
+    } on PatientLoginException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
     } catch (e) {
       if (!mounted) return;
 
@@ -1154,6 +1249,20 @@ class _AuthScreenState extends State<AuthScreen> {
                           return null;
                         },
                       ),
+                      if (_isLogin)
+                        Material(
+                          color: Colors.transparent,
+                          child: CheckboxListTile(
+                            key: const ValueKey('remember-me-checkbox'),
+                            contentPadding: EdgeInsets.zero,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            title: const Text('Remember Me'),
+                            value: _rememberMe,
+                            onChanged: (value) {
+                              setState(() => _rememberMe = value ?? false);
+                            },
+                          ),
+                        ),
                       if (!_isLogin) ...[
                         const SizedBox(height: 12),
                         TextFormField(
@@ -1700,14 +1809,23 @@ String formatPhilippinePeso(double? price) {
 
 class DashboardScreen extends StatefulWidget {
   final Map<String, dynamic> profileData;
+  final PatientSessionService? sessionService;
+  final Future<void> Function()? onLogout;
 
-  const DashboardScreen({super.key, required this.profileData});
+  const DashboardScreen({
+    super.key,
+    required this.profileData,
+    this.sessionService,
+    this.onLogout,
+  });
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  late final PatientSessionService _sessionService =
+      widget.sessionService ?? patientSessionService;
   int _selectedIndex = 0;
   int _profileRefreshGeneration = 0;
   bool _exitDialogOpen = false;
@@ -2276,10 +2394,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
       confirmLabel: 'Yes, Log Out',
     );
     if (shouldLogout == true && mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const AuthScreen()),
-        (route) => false,
-      );
+      try {
+        await _sessionService.clear();
+      } catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Could not clear the saved sign-in. Please try logging out again. $error',
+            ),
+          ),
+        );
+        return;
+      }
+      await notificationsController.clear();
+      if (!mounted) return;
+      final onLogout = widget.onLogout;
+      if (onLogout != null) {
+        await onLogout();
+      } else {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => AuthScreen(sessionService: _sessionService),
+          ),
+          (route) => false,
+        );
+      }
     }
   }
 
@@ -2560,6 +2700,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 label: 'My Profile',
                 icon: Icons.person_outline,
                 onTap: () => _onItemTapped(4),
+              ),
+              _DashboardTile(
+                label: 'Support Service',
+                icon: Icons.support_agent_outlined,
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const SupportServiceScreen(),
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -3092,10 +3243,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           crossAxisSpacing: 12,
                           mainAxisSpacing: 12,
 
-                          // FIX:
-                          // Give every card enough vertical space
-                          // instead of calculating height from width.
-                          mainAxisExtent: 260,
+                          mainAxisExtent: 230,
                         ),
                     itemCount: filteredFrames.length,
                     itemBuilder: (context, index) {
@@ -3184,9 +3332,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               Padding(
                                 padding: const EdgeInsets.fromLTRB(
                                   12,
-                                  10,
+                                  8,
                                   12,
-                                  10,
+                                  8,
                                 ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3204,7 +3352,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       ),
                                     ),
 
-                                    const SizedBox(height: 4),
+                                    const SizedBox(height: 3),
 
                                     // BRAND
                                     if (frame.brand != null &&
@@ -3220,7 +3368,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         ),
                                       ),
 
-                                    const SizedBox(height: 8),
+                                    const SizedBox(height: 6),
 
                                     // PRICE + STOCK
                                     Row(
@@ -3290,6 +3438,237 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // =====================================================
   // APPOINTMENTS TAB
   // =====================================================
+
+  String _appointmentDateLabel(dynamic value) {
+    final rawDate = value?.toString().trim() ?? '';
+    if (rawDate.isEmpty) return '';
+
+    final parsedDate = DateTime.tryParse(rawDate.split('T').first);
+    if (parsedDate == null) return rawDate;
+
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[parsedDate.month - 1]} ${parsedDate.day}, ${parsedDate.year}';
+  }
+
+  String _appointmentTimeLabel(dynamic value) {
+    final rawTime = value?.toString().trim() ?? '';
+    if (rawTime.isEmpty) return '';
+
+    final match = RegExp(r'^(\d{1,2}):(\d{2})(?::\d{2})?$').firstMatch(rawTime);
+    if (match == null) return rawTime;
+
+    final hour = int.tryParse(match.group(1)!);
+    final minute = int.tryParse(match.group(2)!);
+    if (hour == null || minute == null || hour > 23 || minute > 59) {
+      return rawTime;
+    }
+
+    final period = hour < 12 ? 'AM' : 'PM';
+    final displayHour = hour % 12 == 0 ? 12 : hour % 12;
+    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
+  }
+
+  Widget _buildAppointmentCard(Map<String, dynamic> data) {
+    final rawDate = data['appointment_date']?.toString().trim() ?? '';
+    final appointmentDate = DateTime.tryParse(rawDate.split('T').first);
+    final monthLabel = appointmentDate == null
+        ? '---'
+        : _appointmentDateLabel(rawDate).split(' ').first.toUpperCase();
+    final dayLabel = appointmentDate == null
+        ? '--'
+        : appointmentDate.day.toString();
+
+    final purposeOfVisit = (data['purpose_of_visit'] ?? '').toString().trim();
+    final provider = (data['provider'] ?? '').toString().trim();
+    final appointmentType = (data['appointment_type'] ?? '').toString().trim();
+    final parsedProvider = provider.isNotEmpty
+        ? provider
+        : (purposeOfVisit.contains(' - ')
+                  ? purposeOfVisit.split(' - ').first
+                  : purposeOfVisit)
+              .trim();
+    final parsedType = appointmentType.isNotEmpty
+        ? appointmentType
+        : (purposeOfVisit.contains(' - ')
+                  ? purposeOfVisit.split(' - ').last
+                  : 'General')
+              .trim();
+    final title = parsedProvider.isNotEmpty
+        ? parsedProvider
+        : parsedType.isNotEmpty
+        ? parsedType
+        : 'Appointment';
+
+    final status = normalizeAppointmentStatus(
+      data['appointment_status'] ?? data['status'],
+    );
+    final statusKey = status.toLowerCase();
+    final statusColor = statusKey == 'confirmed'
+        ? primaryBlue
+        : statusKey == 'pending'
+        ? Colors.orange.shade800
+        : statusKey == 'cancelled'
+        ? Colors.red.shade700
+        : Colors.blueGrey;
+    final source = (data['appointment_source'] ?? data['source'] ?? '')
+        .toString()
+        .trim();
+    final metadata = [
+      _appointmentDateLabel(rawDate),
+      _appointmentTimeLabel(data['appointment_time']),
+      if (source.isNotEmpty) source,
+    ].where((part) => part.isNotEmpty).join(' · ');
+
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Color(0xFF172B4D),
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          metadata.isEmpty ? 'Appointment details unavailable' : metadata,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.black54,
+            fontSize: 12,
+            height: 1.35,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Provider: ${parsedProvider.isEmpty ? '-' : parsedProvider}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.black87, fontSize: 12),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          'Type: ${parsedType.isEmpty ? '-' : parsedType}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.black87, fontSize: 12),
+        ),
+      ],
+    );
+
+    final dateTile = Container(
+      width: 58,
+      height: 70,
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF3FF),
+        border: Border.all(color: const Color(0xFFD4E5FF)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            monthLabel,
+            style: const TextStyle(
+              color: primaryBlue,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.7,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            dayLabel,
+            style: const TextStyle(
+              color: Color(0xFF173A70),
+              fontSize: 23,
+              fontWeight: FontWeight.w700,
+              height: 1.1,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final statusBadge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: statusColor.withValues(alpha: 0.1),
+        border: Border.all(color: statusColor.withValues(alpha: 0.2)),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        status.toUpperCase(),
+        maxLines: 1,
+        style: TextStyle(
+          color: statusColor,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.35,
+        ),
+      ),
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFFE1E8F0)),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 340) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Align(alignment: Alignment.centerRight, child: statusBadge),
+                const SizedBox(height: 8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    dateTile,
+                    const SizedBox(width: 12),
+                    Expanded(child: details),
+                  ],
+                ),
+              ],
+            );
+          }
+
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              dateTile,
+              const SizedBox(width: 12),
+              Expanded(child: details),
+              const SizedBox(width: 8),
+              statusBadge,
+            ],
+          );
+        },
+      ),
+    );
+  }
 
   Widget _buildAppointmentsTab() {
     return RefreshIndicator(
@@ -3371,107 +3750,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             )
           else
-            ..._appointments.map((appointment) {
-              final data = appointment as Map<String, dynamic>;
-
-              final purposeOfVisit = (data['purpose_of_visit'] ?? '')
-                  .toString();
-
-              final provider = (data['provider'] ?? '').toString().trim();
-
-              final appointmentType = (data['appointment_type'] ?? '')
-                  .toString()
-                  .trim();
-
-              final parsedProvider = provider.isNotEmpty
-                  ? provider
-                  : (purposeOfVisit.contains(' - ')
-                            ? purposeOfVisit.split(' - ').first
-                            : purposeOfVisit)
-                        .trim();
-
-              final parsedType = appointmentType.isNotEmpty
-                  ? appointmentType
-                  : (purposeOfVisit.contains(' - ')
-                            ? purposeOfVisit.split(' - ').last
-                            : 'General')
-                        .trim();
-
-              final status = normalizeAppointmentStatus(
-                data['appointment_status'] ?? data['status'],
-              );
-
-              final statusKey = status.toLowerCase();
-
-              final statusColor = statusKey == 'confirmed'
-                  ? Colors.green
-                  : statusKey == 'pending'
-                  ? Colors.orange
-                  : statusKey == 'cancelled'
-                  ? Colors.red
-                  : Colors.grey;
-
-              return Card(
-                margin: const EdgeInsets.only(bottom: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                elevation: 2,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${data['appointment_date']} · ${data['appointment_time']}',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Color.fromRGBO(
-                                (statusColor.r * 255.0).round(),
-                                (statusColor.g * 255.0).round(),
-                                (statusColor.b * 255.0).round(),
-                                0.12,
-                              ),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Text(
-                              status.isEmpty ? 'UNKNOWN' : status.toUpperCase(),
-                              style: TextStyle(
-                                color: statusColor,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Provider: ${parsedProvider.isEmpty ? '-' : parsedProvider}',
-                        style: const TextStyle(color: Colors.black87),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        'Type: ${parsedType.isEmpty ? '-' : parsedType}',
-                        style: const TextStyle(color: Colors.black87),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }),
+            ..._appointments.map(
+              (appointment) =>
+                  _buildAppointmentCard(appointment as Map<String, dynamic>),
+            ),
         ],
       ),
     );

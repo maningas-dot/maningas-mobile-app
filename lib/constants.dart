@@ -4,7 +4,7 @@
 //   flutter run --dart-define=API_BASE_URL=http://10.0.2.2/optcare_api
 const String apiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
-  defaultValue: 'https://gonzalesvisionclinic.onrender.com',
+  defaultValue: 'https://api.gonzalesvisionclinic.com',
 );
 
 String _stripPhilippineCountryCode(String digits) {

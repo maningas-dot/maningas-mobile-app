@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'app_settings.dart';
 import 'constants.dart';
+import 'support_service_preview.dart' show SupportServiceScreen;
 import 'terms_and_conditions.dart';
 import 'verification_screen.dart';
 
@@ -234,6 +235,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Navigator.of(
       context,
     ).push(MaterialPageRoute(builder: (_) => const TermsAndConditionsScreen()));
+  }
+
+  void _openSupportService() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const SupportServiceScreen()));
   }
 
   @override
@@ -503,6 +510,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: const Text('View the clinic terms and conditions'),
                 trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                 onTap: _openTermsAndConditions,
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(22),
+              ),
+              elevation: 3,
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 8,
+                ),
+                leading: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0F76FF).withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Icon(
+                    Icons.support_agent_outlined,
+                    color: Color(0xFF0F76FF),
+                  ),
+                ),
+                title: const Text(
+                  'Support Service',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text('View support tickets (preview only)'),
+                trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                onTap: _openSupportService,
               ),
             ),
 

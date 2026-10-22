@@ -39,6 +39,7 @@ dependencies:
   webview_flutter: ^4.10.0
   permission_handler: ^13.0.2
   ph_address_finder: ^5.0.1
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:

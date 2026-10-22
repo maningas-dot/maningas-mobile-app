@@ -6,6 +6,107 @@ import 'package:http/http.dart' as http;
 
 import 'constants.dart';
 
+const _clinicUtcOffset = Duration(hours: 8);
+
+DateTime appointmentClinicLocalNow({DateTime? now, DateTime? utcNow}) {
+  final clinicTime =
+      now ?? (utcNow ?? DateTime.now().toUtc()).add(_clinicUtcOffset);
+  return DateTime.utc(
+    clinicTime.year,
+    clinicTime.month,
+    clinicTime.day,
+    clinicTime.hour,
+    clinicTime.minute,
+    clinicTime.second,
+    clinicTime.millisecond,
+    clinicTime.microsecond,
+  );
+}
+
+List<TimeOfDay> generateAppointmentTimeSlots() {
+  const firstMinute = 8 * 60;
+  const lastMinute = 17 * 60 + 30;
+  return [
+    for (var minute = firstMinute; minute <= lastMinute; minute += 30)
+      TimeOfDay(hour: minute ~/ 60, minute: minute % 60),
+  ];
+}
+
+bool isAppointmentStatusBlocking(dynamic status) {
+  final normalized = status?.toString().trim().toLowerCase() ?? '';
+  return !const {
+    'cancelled',
+    'canceled',
+    'rejected',
+    'declined',
+  }.contains(normalized);
+}
+
+String appointmentSlotKey(DateTime date, TimeOfDay time) =>
+    '${date.year.toString().padLeft(4, '0')}-'
+    '${date.month.toString().padLeft(2, '0')}-'
+    '${date.day.toString().padLeft(2, '0')} '
+    '${time.hour.toString().padLeft(2, '0')}:'
+    '${time.minute.toString().padLeft(2, '0')}';
+
+bool isAppointmentSlotWithinBookingCutoff(
+  DateTime date,
+  TimeOfDay time, {
+  DateTime? now,
+}) {
+  final localNow = appointmentClinicLocalNow(now: now);
+  if (date.year != localNow.year ||
+      date.month != localNow.month ||
+      date.day != localNow.day) {
+    return false;
+  }
+
+  final appointmentDateTime = DateTime.utc(
+    date.year,
+    date.month,
+    date.day,
+    time.hour,
+    time.minute,
+  );
+  return appointmentDateTime.difference(localNow) <=
+      const Duration(minutes: 20);
+}
+
+bool isAppointmentDateFullyUnavailable(
+  DateTime date,
+  Set<String> bookedSlots, {
+  Set<DateTime> closedDates = const {},
+  bool availabilityVerified = true,
+  DateTime? now,
+}) {
+  return !availabilityVerified ||
+      !isDateSelectableForBooking(date, closedDates, now: now) ||
+      generateAppointmentTimeSlots().every(
+        (time) => !isAppointmentSlotAvailable(
+          date,
+          time,
+          bookedSlots,
+          closedDates: closedDates,
+          availabilityVerified: availabilityVerified,
+          now: now,
+        ),
+      );
+}
+
+bool isAppointmentSlotAvailable(
+  DateTime date,
+  TimeOfDay time,
+  Set<String> bookedSlots, {
+  Set<DateTime> closedDates = const {},
+  bool availabilityVerified = true,
+  DateTime? now,
+}) {
+  return availabilityVerified &&
+      isDateSelectableForBooking(date, closedDates, now: now) &&
+      !isAppointmentSlotWithinBookingCutoff(date, time, now: now) &&
+      !bookedSlots.contains(appointmentSlotKey(date, time));
+}
+
 bool isClinicOpenDay(DateTime date) {
   final weekday = date.weekday;
 
@@ -33,10 +134,23 @@ bool isClinicClosedDate(DateTime date, Set<DateTime> closedDates) {
   );
 }
 
-bool isDateSelectableForBooking(DateTime date, Set<DateTime> closedDates) {
+bool isDateWithinBookingWindow(DateTime date, {DateTime? now}) {
+  final localNow = appointmentClinicLocalNow(now: now);
+  final today = DateTime(localNow.year, localNow.month, localNow.day);
+  final normalized = DateTime(date.year, date.month, date.day);
+  final lastBookableDate = today.add(const Duration(days: 365));
+  return !normalized.isBefore(today) && !normalized.isAfter(lastBookableDate);
+}
+
+bool isDateSelectableForBooking(
+  DateTime date,
+  Set<DateTime> closedDates, {
+  DateTime? now,
+}) {
   final normalized = DateTime(date.year, date.month, date.day);
 
-  return isClinicOpenDay(normalized) &&
+  return isDateWithinBookingWindow(normalized, now: now) &&
+      isClinicOpenDay(normalized) &&
       !isClinicClosedDate(normalized, closedDates);
 }
 
@@ -44,18 +158,31 @@ bool canSubmitAppointmentOnDate(
   DateTime date,
   Set<DateTime> closedDates, {
   required bool closuresVerified,
+  DateTime? now,
 }) {
-  return closuresVerified && isDateSelectableForBooking(date, closedDates);
+  return closuresVerified &&
+      isDateSelectableForBooking(date, closedDates, now: now);
 }
 
-DateTime nextAvailableClinicDate(DateTime date, Set<DateTime> closedDates) {
+DateTime nextAvailableClinicDate(
+  DateTime date,
+  Set<DateTime> closedDates, {
+  DateTime? now,
+}) {
   var nextDate = DateTime(date.year, date.month, date.day);
 
-  while (!isDateSelectableForBooking(nextDate, closedDates)) {
+  final localNow = appointmentClinicLocalNow(now: now);
+  final today = DateTime(localNow.year, localNow.month, localNow.day);
+  final lastBookableDate = today.add(const Duration(days: 365));
+  while (nextDate.isBefore(lastBookableDate) ||
+      nextDate.isAtSameMomentAs(lastBookableDate)) {
+    if (isDateSelectableForBooking(nextDate, closedDates, now: localNow)) {
+      return nextDate;
+    }
     nextDate = nextDate.add(const Duration(days: 1));
   }
 
-  return nextDate;
+  return DateTime(date.year, date.month, date.day);
 }
 
 Set<DateTime> parseClinicClosureDates(dynamic data) {
@@ -126,9 +253,7 @@ Set<DateTime> parseClinicClosureDates(dynamic data) {
 
 Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
   final closedDates = parseClinicClosureDates(data);
-  final reasonsByDate = {
-    for (final date in closedDates) date: <String>{},
-  };
+  final reasonsByDate = {for (final date in closedDates) date: <String>{}};
 
   void addReason(Iterable<DateTime> dates, dynamic rawReason) {
     final reason = rawReason is String ? rawReason.trim() : '';
@@ -188,9 +313,9 @@ Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
 
 DateTime? _parseClinicClosureDate(String rawDate) {
   final normalizedRaw = rawDate.trim();
-  final dateMatch = RegExp(r'^(\d{4})-(\d{2})-(\d{2})').firstMatch(
-    normalizedRaw,
-  );
+  final dateMatch = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})',
+  ).firstMatch(normalizedRaw);
   if (dateMatch == null) return null;
 
   final isDateOnly = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(normalizedRaw);
@@ -269,14 +394,14 @@ String clinicClosureResponseShape(dynamic data) {
           }
         } else {
           final key = dateKeys.firstWhere(
-            (key) => key != 'start_date' && key != 'end_date' && item[key] != null,
+            (key) =>
+                key != 'start_date' && key != 'end_date' && item[key] != null,
             orElse: () => '',
           );
           if (key.isEmpty) continue;
           supportedDateFields++;
           final rawDate = item[key]?.toString().trim() ?? '';
-          if (rawDate.isNotEmpty &&
-              _parseClinicClosureDate(rawDate) != null) {
+          if (rawDate.isNotEmpty && _parseClinicClosureDate(rawDate) != null) {
             parseableDates++;
           }
         }
@@ -307,12 +432,14 @@ class AppointmentSchedulerScreen extends StatefulWidget {
   final dynamic patientId;
   final Future<void> Function() onScheduled;
   final http.Client? client;
+  final DateTime Function()? nowProvider;
 
   const AppointmentSchedulerScreen({
     super.key,
     required this.patientId,
     required this.onScheduled,
     this.client,
+    this.nowProvider,
   });
 
   @override
@@ -320,27 +447,30 @@ class AppointmentSchedulerScreen extends StatefulWidget {
       _AppointmentSchedulerScreenState();
 }
 
-class _AppointmentSchedulerScreenState
-    extends State<AppointmentSchedulerScreen> {
+class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
+    with WidgetsBindingObserver {
   late final http.Client _client = widget.client ?? http.Client();
   late final bool _ownsClient = widget.client == null;
-  DateTime _selectedDate = DateTime.now();
-  DateTime _visibleMonth = DateTime.now();
+  late DateTime _selectedDate;
+  late DateTime _visibleMonth;
 
   TimeOfDay? _selectedTime;
 
   String? _selectedVisitType;
 
   final List<String> _visitTypeOptions = [
-    'Routine Eye Exam',
-    'Eye Check-up',
-    'Eye Glass Fitting',
-    'Medical Eye Issue',
+    'Eye Examination',
+    'Follow Up',
+    'Frame / Eyewear',
+    'Contact Lens',
   ];
 
   bool _creatingAppointment = false;
   bool _loadingAvailability = false;
   bool _refreshingAvailability = false;
+  bool _availabilityVerified = false;
+  Completer<void>? _availabilityLoadCompleter;
+  int _calendarAvailabilityRevision = 0;
 
   String? _availabilityError;
   String? _closureError;
@@ -357,28 +487,7 @@ class _AppointmentSchedulerScreenState
   ============================================================
   */
 
-  final List<TimeOfDay> _operatingTimeSlots = [
-    const TimeOfDay(hour: 8, minute: 0),
-    const TimeOfDay(hour: 8, minute: 30),
-    const TimeOfDay(hour: 9, minute: 0),
-    const TimeOfDay(hour: 9, minute: 30),
-    const TimeOfDay(hour: 10, minute: 0),
-    const TimeOfDay(hour: 10, minute: 30),
-    const TimeOfDay(hour: 11, minute: 0),
-    const TimeOfDay(hour: 11, minute: 30),
-    const TimeOfDay(hour: 12, minute: 0),
-    const TimeOfDay(hour: 12, minute: 30),
-    const TimeOfDay(hour: 13, minute: 0),
-    const TimeOfDay(hour: 13, minute: 30),
-    const TimeOfDay(hour: 14, minute: 0),
-    const TimeOfDay(hour: 14, minute: 30),
-    const TimeOfDay(hour: 15, minute: 0),
-    const TimeOfDay(hour: 15, minute: 30),
-    const TimeOfDay(hour: 16, minute: 0),
-    const TimeOfDay(hour: 16, minute: 30),
-    const TimeOfDay(hour: 17, minute: 0),
-    const TimeOfDay(hour: 17, minute: 30),
-  ];
+  final List<TimeOfDay> _operatingTimeSlots = generateAppointmentTimeSlots();
 
   /*
   ============================================================
@@ -414,13 +523,7 @@ class _AppointmentSchedulerScreenState
     return '${_timeKey(time)}:00';
   }
 
-  bool _isToday(DateTime date) {
-    final now = DateTime.now();
-
-    return date.year == now.year &&
-        date.month == now.month &&
-        date.day == now.day;
-  }
+  DateTime _now() => appointmentClinicLocalNow(now: widget.nowProvider?.call());
 
   /*
   ============================================================
@@ -440,23 +543,11 @@ class _AppointmentSchedulerScreenState
   */
 
   bool _isPastTime(TimeOfDay time) {
-    if (!_isToday(_selectedDate)) {
-      return false;
-    }
-
-    final now = DateTime.now();
-
-    final appointmentDateTime = DateTime(
-      _selectedDate.year,
-      _selectedDate.month,
-      _selectedDate.day,
-      time.hour,
-      time.minute,
+    return isAppointmentSlotWithinBookingCutoff(
+      _selectedDate,
+      time,
+      now: _now(),
     );
-
-    final difference = appointmentDateTime.difference(now);
-
-    return difference <= const Duration(minutes: 20);
   }
 
   /*
@@ -466,10 +557,7 @@ class _AppointmentSchedulerScreenState
   */
 
   bool _isSlotBooked(TimeOfDay time) {
-    final date = _formatDate(_selectedDate);
-    final key = '$date ${_timeKey(time)}';
-
-    return _bookedSlots.contains(key);
+    return _bookedSlots.contains(appointmentSlotKey(_selectedDate, time));
   }
 
   /*
@@ -485,14 +573,23 @@ class _AppointmentSchedulerScreenState
   ============================================================
   */
 
-  Future<void> _loadBookedSlots({bool showLoading = true}) async {
+  Future<void> _loadBookedSlots({
+    bool showLoading = true,
+    bool forceRefresh = false,
+  }) async {
     if (!mounted) return;
 
     if (_refreshingAvailability) {
+      if (forceRefresh) {
+        await _availabilityLoadCompleter?.future;
+        if (!mounted) return;
+        return _loadBookedSlots(showLoading: showLoading, forceRefresh: true);
+      }
       return;
     }
 
     _refreshingAvailability = true;
+    _availabilityLoadCompleter = Completer<void>();
 
     final currentSelectedTime = _selectedTime;
 
@@ -500,6 +597,7 @@ class _AppointmentSchedulerScreenState
       setState(() {
         _loadingAvailability = true;
         _availabilityError = null;
+        _availabilityVerified = false;
         _bookedSlots.clear();
       });
     }
@@ -528,39 +626,34 @@ class _AppointmentSchedulerScreenState
         throw Exception('Invalid appointment data received from server.');
       }
 
-      final selectedDateString = _formatDate(_selectedDate);
-
       final booked = <String>{};
 
       for (final item in decoded) {
         if (item is! Map) continue;
 
-        final status =
-            item['appointment_status']?.toString().trim().toLowerCase() ?? '';
-
-        /*
-        Cancelled appointments DO NOT block the slot.
-
-        Requested, Pending, Confirmed, Completed, etc.
-        DO block the slot.
-        */
-
-        if (status == 'cancelled' || status == 'canceled') {
+        if (!isAppointmentStatusBlocking(item['appointment_status'])) {
           continue;
         }
 
-        final rawDate = item['appointment_date']?.toString() ?? '';
-
-        final rawTime = item['appointment_time']?.toString() ?? '';
-
+        final rawDate = item['appointment_date']?.toString().trim() ?? '';
+        final rawTime = item['appointment_time']?.toString().trim() ?? '';
         final appointmentDate = rawDate.split('T').first;
-
-        final appointmentTime = rawTime.length >= 5
-            ? rawTime.substring(0, 5)
-            : rawTime;
-
-        if (appointmentDate == selectedDateString &&
-            appointmentTime.isNotEmpty) {
+        final timeMatch = RegExp(r'^(\d{1,2}):(\d{2})').firstMatch(rawTime);
+        if (timeMatch == null) continue;
+        final hour = int.tryParse(timeMatch.group(1)!);
+        final minute = int.tryParse(timeMatch.group(2)!);
+        if (hour == null ||
+            minute == null ||
+            hour < 0 ||
+            hour > 23 ||
+            minute < 0 ||
+            minute > 59) {
+          continue;
+        }
+        final appointmentTime =
+            '${hour.toString().padLeft(2, '0')}:'
+            '${minute.toString().padLeft(2, '0')}';
+        if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(appointmentDate)) {
           booked.add('$appointmentDate $appointmentTime');
         }
       }
@@ -571,6 +664,9 @@ class _AppointmentSchedulerScreenState
         _bookedSlots
           ..clear()
           ..addAll(booked);
+        _calendarAvailabilityRevision++;
+        _availabilityVerified = true;
+        _availabilityError = null;
 
         /*
         Keep the currently selected time if it is
@@ -594,10 +690,7 @@ class _AppointmentSchedulerScreenState
         }
       });
 
-      debugPrint(
-        'BOOKED SLOTS FOR $selectedDateString: '
-        '$_bookedSlots',
-      );
+      debugPrint('BOOKED SLOTS: $_bookedSlots');
     } catch (e, st) {
       debugPrint('APPOINTMENT AVAILABILITY ERROR: $e');
 
@@ -606,10 +699,19 @@ class _AppointmentSchedulerScreenState
       if (!mounted) return;
 
       setState(() {
+        _calendarAvailabilityRevision++;
+        _availabilityVerified = false;
+        _bookedSlots.clear();
+        _selectedTime = null;
         _availabilityError = 'Unable to load available appointment times.';
       });
     } finally {
       _refreshingAvailability = false;
+      final loadCompleter = _availabilityLoadCompleter;
+      _availabilityLoadCompleter = null;
+      if (loadCompleter != null && !loadCompleter.isCompleted) {
+        loadCompleter.complete();
+      }
 
       if (mounted) {
         setState(() {
@@ -711,12 +813,21 @@ class _AppointmentSchedulerScreenState
       setState(() {
         _closedDates.clear();
         _closedDates.addAll(nextClosedDates);
+        _calendarAvailabilityRevision++;
         _closureReasonsByDate = nextClosureReasons;
         _closuresVerified = true;
         _closureError = null;
 
-        if (!isDateSelectableForBooking(_selectedDate, _closedDates)) {
-          _selectedDate = nextAvailableClinicDate(_selectedDate, _closedDates);
+        if (!isDateSelectableForBooking(
+          _selectedDate,
+          _closedDates,
+          now: _now(),
+        )) {
+          _selectedDate = nextAvailableClinicDate(
+            _selectedDate,
+            _closedDates,
+            now: _now(),
+          );
         }
         if (_selectedDate != dateBeforeRefresh) {
           _visibleMonth = DateTime(_selectedDate.year, _selectedDate.month);
@@ -736,6 +847,7 @@ class _AppointmentSchedulerScreenState
       if (!mounted) return;
 
       setState(() {
+        _calendarAvailabilityRevision++;
         _closedDates.clear();
         _closureReasonsByDate = {};
         _closuresVerified = false;
@@ -760,9 +872,17 @@ class _AppointmentSchedulerScreenState
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
-    if (!isDateSelectableForBooking(_selectedDate, _closedDates)) {
-      _selectedDate = nextAvailableClinicDate(_selectedDate, _closedDates);
+    final now = _now();
+    _selectedDate = DateTime(now.year, now.month, now.day);
+    _visibleMonth = DateTime(now.year, now.month);
+    if (!isDateSelectableForBooking(_selectedDate, _closedDates, now: _now())) {
+      _selectedDate = nextAvailableClinicDate(
+        _selectedDate,
+        _closedDates,
+        now: _now(),
+      );
     }
 
     _loadClosedDates();
@@ -777,6 +897,36 @@ class _AppointmentSchedulerScreenState
     ) {
       _refreshAvailability();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshAfterResume();
+    }
+  }
+
+  Future<void> _refreshAfterResume() async {
+    if (!mounted) return;
+    final now = _now();
+    final today = DateTime(now.year, now.month, now.day);
+    if (_selectedDate.year != today.year ||
+        _selectedDate.month != today.month ||
+        _selectedDate.day != today.day) {
+      setState(() {
+        _calendarAvailabilityRevision++;
+        _selectedDate = today;
+        _visibleMonth = DateTime(today.year, today.month);
+        _selectedTime = null;
+      });
+    } else {
+      setState(() {
+        _calendarAvailabilityRevision++;
+      });
+    }
+    await _loadClosedDates();
+    if (!mounted) return;
+    await _loadBookedSlots(forceRefresh: true);
   }
 
   /*
@@ -810,6 +960,7 @@ class _AppointmentSchedulerScreenState
       requestedDate,
       _closedDates,
       closuresVerified: _closuresVerified,
+      now: _now(),
     )) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -838,45 +989,89 @@ class _AppointmentSchedulerScreenState
       return;
     }
 
-    /*
-    ------------------------------------------------------------
-    MAKE SURE TIME HAS NOT PASSED
-    ------------------------------------------------------------
-    */
-
-    if (_isPastTime(_selectedTime!)) {
+    final selectedDateForSubmission = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
+    final selectedTimeForSubmission = _selectedTime!;
+    if (!_operatingTimeSlots.any(
+      (time) =>
+          time.hour == selectedTimeForSubmission.hour &&
+          time.minute == selectedTimeForSubmission.minute,
+    )) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'That appointment time is no longer available. '
-            'Please choose another time.',
-          ),
+          content: Text('Please select an available appointment time.'),
         ),
       );
-
-      await _loadBookedSlots();
-
       return;
     }
 
-    /*
-    ------------------------------------------------------------
-    MAKE SURE SLOT IS NOT ALREADY BOOKED
-    ------------------------------------------------------------
-    */
-
-    if (_isSlotBooked(_selectedTime!)) {
+    await _loadBookedSlots(forceRefresh: true);
+    if (!mounted) return;
+    if (!_availabilityVerified || _availabilityError != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'That appointment slot is already reserved. '
-            'Please choose another time.',
+            'Appointment availability could not be verified. Please retry.',
           ),
         ),
       );
-
+      return;
+    }
+    final submissionNow = _now();
+    if (!isAppointmentSlotAvailable(
+      selectedDateForSubmission,
+      selectedTimeForSubmission,
+      _bookedSlots,
+      closedDates: _closedDates,
+      availabilityVerified: _availabilityVerified && _closuresVerified,
+      now: submissionNow,
+    )) {
+      final slotIsReserved = _bookedSlots.contains(
+        appointmentSlotKey(
+          selectedDateForSubmission,
+          selectedTimeForSubmission,
+        ),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            slotIsReserved
+                ? 'That appointment slot is already reserved. '
+                      'Please choose another time.'
+                : 'That appointment time is no longer available. '
+                      'Please choose another time.',
+          ),
+        ),
+      );
       await _loadBookedSlots();
-
+      return;
+    }
+    final selectionChanged =
+        selectedDateForSubmission !=
+            DateTime(
+              _selectedDate.year,
+              _selectedDate.month,
+              _selectedDate.day,
+            ) ||
+        _selectedTime?.hour != selectedTimeForSubmission.hour ||
+        _selectedTime?.minute != selectedTimeForSubmission.minute;
+    if (selectionChanged ||
+        !canSubmitAppointmentOnDate(
+          selectedDateForSubmission,
+          _closedDates,
+          closuresVerified: _closuresVerified,
+          now: _now(),
+        )) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'The selected appointment is no longer available. Please select it again.',
+          ),
+        ),
+      );
       return;
     }
 
@@ -919,9 +1114,9 @@ class _AppointmentSchedulerScreenState
     try {
       final uri = Uri.parse('$apiBaseUrl/api/appointments');
 
-      final appointmentDate = _formatDate(_selectedDate);
+      final appointmentDate = _formatDate(selectedDateForSubmission);
 
-      final appointmentTime = _toMysqlTime(_selectedTime!);
+      final appointmentTime = _toMysqlTime(selectedTimeForSubmission);
 
       /*
       The provider has been removed.
@@ -1100,6 +1295,7 @@ class _AppointmentSchedulerScreenState
   @override
   void dispose() {
     _availabilityRefreshTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     if (_ownsClient) _client.close();
 
     super.dispose();
@@ -1168,10 +1364,14 @@ class _AppointmentSchedulerScreenState
   */
 
   Widget _buildCalendarCard() {
-    final today = DateTime(
-      DateTime.now().year,
-      DateTime.now().month,
-      DateTime.now().day,
+    final now = _now();
+    final today = DateTime(now.year, now.month, now.day);
+    final selectedDateIsSelectable = !isAppointmentDateFullyUnavailable(
+      _selectedDate,
+      _bookedSlots,
+      closedDates: _closedDates,
+      availabilityVerified: _availabilityVerified && _closuresVerified,
+      now: now,
     );
 
     return Card(
@@ -1184,9 +1384,10 @@ class _AppointmentSchedulerScreenState
           children: [
             CalendarDatePicker(
               key: ValueKey(
-                'appointment-calendar-${_formatDate(_selectedDate)}',
+                'appointment-calendar-${_formatDate(_selectedDate)}-'
+                '${now.hour}:${now.minute}-$_calendarAvailabilityRevision',
               ),
-              initialDate: _selectedDate,
+              initialDate: selectedDateIsSelectable ? _selectedDate : null,
               firstDate: today,
               lastDate: today.add(const Duration(days: 365)),
               currentDate: today,
@@ -1202,17 +1403,14 @@ class _AppointmentSchedulerScreenState
                   date.day,
                 );
 
-                final isCurrentSelection =
-                    normalizedDate.year == _selectedDate.year &&
-                    normalizedDate.month == _selectedDate.month &&
-                    normalizedDate.day == _selectedDate.day;
-
-                return isCurrentSelection ||
-                    (_closuresVerified &&
-                        isDateSelectableForBooking(
-                          normalizedDate,
-                          _closedDates,
-                        ));
+                return !isAppointmentDateFullyUnavailable(
+                  normalizedDate,
+                  _bookedSlots,
+                  closedDates: _closedDates,
+                  availabilityVerified:
+                      _availabilityVerified && _closuresVerified,
+                  now: now,
+                );
               },
               onDateChanged: (date) async {
                 final normalizedDate = DateTime(
@@ -1222,7 +1420,15 @@ class _AppointmentSchedulerScreenState
                 );
 
                 if (!_closuresVerified ||
-                    !isDateSelectableForBooking(normalizedDate, _closedDates)) {
+                    !_availabilityVerified ||
+                    isAppointmentDateFullyUnavailable(
+                      normalizedDate,
+                      _bookedSlots,
+                      closedDates: _closedDates,
+                      availabilityVerified:
+                          _availabilityVerified && _closuresVerified,
+                      now: _now(),
+                    )) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text(
@@ -1250,11 +1456,20 @@ class _AppointmentSchedulerScreenState
             else if (_closureError != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  _closureError!,
-                  key: const ValueKey('clinic-closure-load-error'),
-                  style: TextStyle(color: Colors.red.shade700),
-                  textAlign: TextAlign.center,
+                child: Column(
+                  children: [
+                    Text(
+                      _closureError!,
+                      key: const ValueKey('clinic-closure-load-error'),
+                      style: TextStyle(color: Colors.red.shade700),
+                      textAlign: TextAlign.center,
+                    ),
+                    TextButton(
+                      key: const ValueKey('retry-clinic-closures'),
+                      onPressed: _loadClosedDates,
+                      child: const Text('Retry'),
+                    ),
+                  ],
                 ),
               )
             else
@@ -1272,8 +1487,9 @@ class _AppointmentSchedulerScreenState
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      for (final reason in _closureReasonsByDate[date] ??
-                          const {'No reason provided.'})
+                      for (final reason
+                          in _closureReasonsByDate[date] ??
+                              const {'No reason provided.'})
                         Text(
                           'Reason: $reason',
                           key: ValueKey(
@@ -1315,6 +1531,7 @@ class _AppointmentSchedulerScreenState
   */
 
   Widget _buildTimeCard() {
+    final now = _now();
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       elevation: 3,
@@ -1363,10 +1580,23 @@ class _AppointmentSchedulerScreenState
                   color: Colors.red.shade50,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text(
-                  _closureError ??
-                      'Clinic closure dates could not be verified. Appointment times are unavailable.',
-                  style: TextStyle(color: Colors.red.shade700, fontSize: 13),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _closureError ??
+                          'Clinic closure dates could not be verified. Appointment times are unavailable.',
+                      style: TextStyle(
+                        color: Colors.red.shade700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    TextButton(
+                      key: const ValueKey('retry-clinic-closures-times'),
+                      onPressed: _loadClosedDates,
+                      child: const Text('Retry'),
+                    ),
+                  ],
                 ),
               )
             else if (isClinicClosedDate(_selectedDate, _closedDates))
@@ -1396,9 +1626,22 @@ class _AppointmentSchedulerScreenState
                   color: Colors.red.shade50,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text(
-                  _availabilityError!,
-                  style: TextStyle(color: Colors.red.shade700, fontSize: 13),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _availabilityError!,
+                      style: TextStyle(
+                        color: Colors.red.shade700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    TextButton(
+                      key: const ValueKey('retry-appointment-availability'),
+                      onPressed: _loadBookedSlots,
+                      child: const Text('Retry'),
+                    ),
+                  ],
                 ),
               )
             else
@@ -1408,9 +1651,21 @@ class _AppointmentSchedulerScreenState
                 children: _operatingTimeSlots.map((time) {
                   final booked = _isSlotBooked(time);
 
-                  final past = _isPastTime(time);
-
-                  final disabled = booked || past;
+                  final available = isAppointmentSlotAvailable(
+                    _selectedDate,
+                    time,
+                    _bookedSlots,
+                    closedDates: _closedDates,
+                    availabilityVerified:
+                        _availabilityVerified && _closuresVerified,
+                    now: now,
+                  );
+                  final past = isAppointmentSlotWithinBookingCutoff(
+                    _selectedDate,
+                    time,
+                    now: now,
+                  );
+                  final disabled = !available;
 
                   final selected =
                       _selectedTime != null &&
@@ -1423,6 +1678,20 @@ class _AppointmentSchedulerScreenState
                       onPressed: disabled
                           ? null
                           : () {
+                              if (!isAppointmentSlotAvailable(
+                                _selectedDate,
+                                time,
+                                _bookedSlots,
+                                closedDates: _closedDates,
+                                availabilityVerified:
+                                    _availabilityVerified && _closuresVerified,
+                                now: _now(),
+                              )) {
+                                setState(() {
+                                  _selectedTime = null;
+                                });
+                                return;
+                              }
                               setState(() {
                                 _selectedTime = time;
                               });
@@ -1432,12 +1701,16 @@ class _AppointmentSchedulerScreenState
 
                         backgroundColor: selected
                             ? const Color(0xFF0F76FF)
+                            : booked
+                            ? Colors.red.shade50
                             : disabled
                             ? Colors.grey.shade100
                             : Colors.white,
 
                         foregroundColor: selected
                             ? Colors.white
+                            : booked
+                            ? Colors.red.shade700
                             : disabled
                             ? Colors.grey
                             : const Color(0xFF0F76FF),
@@ -1445,6 +1718,8 @@ class _AppointmentSchedulerScreenState
                         side: BorderSide(
                           color: selected
                               ? const Color(0xFF0F76FF)
+                              : booked
+                              ? Colors.red.shade200
                               : disabled
                               ? Colors.grey.shade300
                               : const Color(0xFF0F76FF),
@@ -1466,9 +1741,14 @@ class _AppointmentSchedulerScreenState
                               'Reserved',
                               style: TextStyle(fontSize: 10),
                             )
-                          else if (past)
+                          else if (past || (!available && !booked))
                             const Text(
                               'Booking Closed',
+                              style: TextStyle(fontSize: 10),
+                            )
+                          else
+                            const Text(
+                              'Available',
                               style: TextStyle(fontSize: 10),
                             ),
                         ],

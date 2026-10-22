@@ -78,7 +78,7 @@ void main() {
               ),
             );
             await tester.pumpAndSettle();
-            await tester.tap(find.text('Profile').last);
+            await tester.tap(find.text('My Profile').last);
             await tester.pumpAndSettle();
 
             expect(find.text('Casey Sample Patient'), findsOneWidget);
@@ -192,7 +192,7 @@ void main() {
                 ),
               ),
             );
-            await tester.tap(find.text('Profile').last);
+            await tester.tap(find.text('My Profile').last);
             await tester.pump();
 
             expect(
@@ -294,7 +294,7 @@ void main() {
             }
             expect(staleRefreshStarted.isCompleted, isTrue);
 
-            await tester.tap(find.text('Profile').last);
+            await tester.tap(find.text('My Profile').last);
             await tester.pumpAndSettle();
             await tester.ensureVisible(find.text('Edit Profile'));
             await tester.tap(find.text('Edit Profile'));

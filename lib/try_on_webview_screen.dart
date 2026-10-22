@@ -41,7 +41,7 @@ class _TryOnWebViewScreenState extends State<TryOnWebViewScreen> {
     // 2. BUILD TRY-ON URL
     // --------------------------------------------------
 
-    final url = Uri.parse('https://gonzalesvisionclinic.onrender.com').replace(
+    final url = Uri.parse('https://api.gonzalesvisionclinic.com').replace(
       queryParameters: {
         'frameId': widget.frameId.toString(),
         'mobileTryOn': 'true',
