@@ -1,10 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:optcare_app/app_notifications.dart';
 import 'package:optcare_app/main.dart';
+import 'package:optcare_app/notification_screen.dart';
 import 'package:optcare_app/services/patient_session_service.dart';
 
 void main() {
@@ -13,6 +15,7 @@ void main() {
   testWidgets('system Back No keeps the current tab and session active', (
     tester,
   ) async {
+    await notificationsController.clear();
     await http.runWithClient(() async {
       await tester.pumpWidget(
         const MaterialApp(
@@ -54,6 +57,7 @@ void main() {
   testWidgets('system Back Yes requests platform app exit without logout', (
     tester,
   ) async {
+    await notificationsController.clear();
     final platformCalls = <String>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
@@ -92,11 +96,23 @@ void main() {
   testWidgets(
     'logout cancellation stays authenticated and confirmation logs out',
     (tester) async {
-      final tokenStorage = _MemoryTokenStorage()..value = 'synthetic-jwt';
+      await notificationsController.clear();
+      final tokenStorage = _MemoryTokenStorage();
+      final sessionClient = MockClient(
+        (_) async => http.Response(
+          jsonEncode({'token': 'synthetic-jwt', 'patient_id': patientId}),
+          200,
+        ),
+      );
       final sessionService = PatientSessionService(
-        client: MockClient((_) async => http.Response('{}', 200)),
+        client: sessionClient,
         tokenStorage: tokenStorage,
         baseUrl: 'https://api.example.test',
+      );
+      await sessionService.login(
+        email: 'patient@example.test',
+        password: 'synthetic-password',
+        rememberMe: false,
       );
       var markReadRequests = 0;
       await http.runWithClient(
@@ -158,6 +174,7 @@ void main() {
         },
         () => MockClient((request) async {
           if (request.url.path.endsWith('/read-all')) {
+            expect(request.headers['Authorization'], contains('synthetic-jwt'));
             markReadRequests++;
             return http.Response('{}', 200);
           }
@@ -165,6 +182,7 @@ void main() {
         }),
       );
       sessionService.close();
+      sessionClient.close();
     },
   );
 }

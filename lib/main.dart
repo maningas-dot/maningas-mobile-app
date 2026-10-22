@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:ph_address_finder/ph_address_finder.dart';
 import 'appointment_scheduler.dart';
-import 'app_notifications.dart';
 import 'app_settings.dart';
 import 'constants.dart';
 import 'notification_screen.dart';
@@ -1910,7 +1909,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final patientId = _profile['patient_id']?.toString().trim() ?? '';
 
     if (patientId.isNotEmpty) {
-      notificationsController.load(patientId);
+      notificationsController.load(patientId, token: _sessionService.token);
     }
   }
 
@@ -3532,48 +3531,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (source.isNotEmpty) source,
     ].where((part) => part.isNotEmpty).join(' · ');
 
-    final details = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Color(0xFF172B4D),
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(height: 5),
-        Text(
-          metadata.isEmpty ? 'Appointment details unavailable' : metadata,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Colors.black54,
-            fontSize: 12,
-            height: 1.35,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          'Provider: ${parsedProvider.isEmpty ? '-' : parsedProvider}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.black87, fontSize: 12),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          'Type: ${parsedType.isEmpty ? '-' : parsedType}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.black87, fontSize: 12),
-        ),
-      ],
-    );
-
     final dateTile = Container(
       width: 58,
       height: 70,
@@ -3627,6 +3584,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
     );
 
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF172B4D),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            statusBadge,
+          ],
+        ),
+        const SizedBox(height: 5),
+        Text(
+          metadata.isEmpty ? 'Appointment details unavailable' : metadata,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.black54,
+            fontSize: 12,
+            height: 1.35,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Provider: ${parsedProvider.isEmpty ? '-' : parsedProvider}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.black87, fontSize: 12),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          'Type: ${parsedType.isEmpty ? '-' : parsedType}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.black87, fontSize: 12),
+        ),
+      ],
+    );
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(12),
@@ -3641,8 +3649,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Align(alignment: Alignment.centerRight, child: statusBadge),
-                const SizedBox(height: 8),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -3661,8 +3667,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               dateTile,
               const SizedBox(width: 12),
               Expanded(child: details),
-              const SizedBox(width: 8),
-              statusBadge,
             ],
           );
         },
@@ -4234,6 +4238,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   MaterialPageRoute(
                     builder: (_) => NotificationScreen(
                       patientId: _profile['patient_id']?.toString() ?? '',
+                      token: _sessionService.token,
                     ),
                   ),
                 );
