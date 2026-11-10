@@ -552,6 +552,88 @@ void main() {
     client.close();
   });
 
+  testWidgets(
+    'appointment terms link opens all five terms and closing preserves selections',
+    (tester) async {
+      final now = DateTime(2026, 10, 5, 7);
+      final selectedDate = DateTime(2026, 10, 6);
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments') {
+          return _jsonResponse(200, []);
+        }
+        return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => now,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await _prepareAppointmentSubmission(tester, selectedDate);
+
+      final selectedDateText = find.textContaining('Selected:');
+      final dateBeforeDialog = tester.widget<Text>(selectedDateText).data;
+      final termsLink = find.byKey(const ValueKey('appointment-terms-link'));
+      await tester.ensureVisible(termsLink);
+      await tester.tap(termsLink);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(Dialog), findsOneWidget);
+      expect(find.text('Appointment Terms & Conditions'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('appointment-terms-scroll')),
+        findsOneWidget,
+      );
+      for (final term in [
+        '1. Select an available date from today through the next 12 months. '
+            'Past dates, Sundays, and clinic closure dates cannot be booked.',
+        '2. Choose an available time slot. Slots are offered in 30-minute '
+            'intervals from 8:00 AM to 5:30 PM. Availability can change; if a '
+            'slot is taken before your request is submitted, select another '
+            'available time.',
+        '3. Choose the purpose that best matches your visit: Eye Examination, '
+            'Follow-up, Frame / Eyewear, Contact Lens. Review the selected date, '
+            'time, and purpose before submitting.',
+        '4. Submitting creates an appointment request, not a confirmed '
+            'appointment. The clinic must approve the request before it is '
+            'confirmed.',
+        '5. You can cancel an eligible upcoming appointment from My '
+            'Appointments. Cancellation cannot be undone. To request a '
+            'different time, cancel the existing appointment if eligible, then '
+            'submit a new request for an available slot.',
+      ]) {
+        expect(find.text(term), findsOneWidget);
+      }
+
+      await tester.tap(find.byKey(const ValueKey('appointment-terms-close')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(Dialog), findsNothing);
+      expect(tester.widget<Text>(selectedDateText).data, dateBeforeDialog);
+      expect(find.text('8:00 AM'), findsOneWidget);
+      expect(
+        tester
+            .state<FormFieldState<String>>(
+              find.byType(DropdownButtonFormField<String>),
+            )
+            .value,
+        'Eye Examination',
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
+
   testWidgets('shows deduplicated reasons for every date in a closure range', (
     tester,
   ) async {

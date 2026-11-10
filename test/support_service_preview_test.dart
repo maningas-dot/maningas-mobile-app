@@ -1,12 +1,32 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:optcare_app/services/patient_session_service.dart';
+import 'package:optcare_app/services/support_center_service.dart';
 import 'package:optcare_app/support_service_preview.dart';
 
 void main() {
   testWidgets('New Ticket action is blue, readable, and opens the form', (
     tester,
   ) async {
-    await tester.pumpWidget(const MaterialApp(home: SupportServiceScreen()));
+    final service = SupportCenterService(
+      sessionService: PatientSessionService(
+        client: MockClient((_) async => http.Response('{}', 200)),
+      ),
+      client: MockClient(
+        (_) async => http.Response(
+          jsonEncode({'success': true, 'tickets': <Object>[]}),
+          200,
+        ),
+      ),
+      baseUrl: 'https://api.example.test',
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: SupportServiceScreen(supportCenterService: service)),
+    );
 
     final buttonFinder = find.ancestor(
       of: find.text('New Ticket'),

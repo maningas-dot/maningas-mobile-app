@@ -1815,6 +1815,128 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
     );
   }
 
+  Future<void> _showAppointmentTerms() {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final maxHeight = MediaQuery.sizeOf(dialogContext).height * 0.85;
+        return Dialog(
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical: 24,
+          ),
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: 560, maxHeight: maxHeight),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Appointment Terms & Conditions',
+                          style: TextStyle(
+                            color: Color(0xFF172B4D),
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        key: const ValueKey('appointment-terms-close-icon'),
+                        tooltip: 'Close Appointment Terms & Conditions',
+                        onPressed: () => Navigator.of(dialogContext).pop(),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Flexible(
+                  child: SingleChildScrollView(
+                    key: const ValueKey('appointment-terms-scroll'),
+                    padding: const EdgeInsets.all(20),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          '1. Select an available date from today through the '
+                          'next 12 months. Past dates, Sundays, and clinic '
+                          'closure dates cannot be booked.',
+                        ),
+                        SizedBox(height: 14),
+                        Text(
+                          '2. Choose an available time slot. Slots are offered '
+                          'in 30-minute intervals from 8:00 AM to 5:30 PM. '
+                          'Availability can change; if a slot is taken before '
+                          'your request is submitted, select another available '
+                          'time.',
+                        ),
+                        SizedBox(height: 14),
+                        Text(
+                          '3. Choose the purpose that best matches your visit: '
+                          'Eye Examination, Follow-up, Frame / Eyewear, Contact '
+                          'Lens. Review the selected date, time, and purpose '
+                          'before submitting.',
+                        ),
+                        SizedBox(height: 14),
+                        Text(
+                          '4. Submitting creates an appointment request, not a '
+                          'confirmed appointment. The clinic must approve the '
+                          'request before it is confirmed.',
+                        ),
+                        SizedBox(height: 14),
+                        Text(
+                          '5. You can cancel an eligible upcoming appointment '
+                          'from My Appointments. Cancellation cannot be undone. '
+                          'To request a different time, cancel the existing '
+                          'appointment if eligible, then submit a new request '
+                          'for an available slot.',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      key: const ValueKey('appointment-terms-close'),
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('Close'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAppointmentTermsLink() {
+    return Align(
+      alignment: Alignment.center,
+      child: TextButton.icon(
+        key: const ValueKey('appointment-terms-link'),
+        onPressed: _showAppointmentTerms,
+        icon: const Icon(Icons.info_outline, size: 18),
+        label: const Text('View Appointment Terms & Conditions'),
+        style: TextButton.styleFrom(
+          foregroundColor: const Color(0xFF0F76FF),
+        ),
+      ),
+    );
+  }
+
   /*
   ============================================================
   CONFIRM BUTTON
@@ -1880,7 +2002,11 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
 
               _buildInputCard(),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 8),
+
+              _buildAppointmentTermsLink(),
+
+              const SizedBox(height: 16),
 
               _buildActionButton(),
             ],

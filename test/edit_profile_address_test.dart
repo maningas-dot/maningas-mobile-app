@@ -615,6 +615,7 @@ void main() {
     tester,
   ) async {
     Map<String, dynamic>? savedPayload;
+    Map<String, dynamic>? returnedProfile;
     var returnedFromEdit = false;
 
     await http.runWithClient(
@@ -622,9 +623,13 @@ void main() {
         await _openEditProfile(
           tester,
           _ambiguousAddress,
-          onResult: (_) => returnedFromEdit = true,
+          onResult: (profile) {
+            returnedProfile = profile;
+            returnedFromEdit = true;
+          },
         );
-        await tester.enterText(_fieldFinder('Email'), 'updated@example.com');
+        expect(find.text('Email'), findsNothing);
+        await tester.enterText(_fieldFinder('Contact number'), '5550100');
         await tester.ensureVisible(find.text('Save'));
         await tester.tap(find.text('Save'));
         await tester.pump();
@@ -655,7 +660,9 @@ void main() {
     );
 
     expect(returnedFromEdit, isTrue);
-    expect(savedPayload?['email'], 'updated@example.com');
+    expect(savedPayload, isNot(contains('email')));
+    expect(savedPayload?['contact_number'], '5550100');
+    expect(returnedProfile?['email'], 'test@example.com');
   });
 
   testWidgets('does not return an updated profile when save fails', (
@@ -936,7 +943,7 @@ void main() {
           includeStructuredAddressFields: false,
         );
         expect(find.text(legacyAddress), findsOneWidget);
-        await tester.enterText(_fieldFinder('Email'), 'updated@example.com');
+        expect(find.text('Email'), findsNothing);
         await tester.enterText(_fieldFinder('Contact number'), '5550100');
         await tester.ensureVisible(find.text('Save'));
         await tester.tap(find.text('Save'));
@@ -962,7 +969,7 @@ void main() {
     );
     expect(
       find.text(
-        'Email or contact changes cannot currently be saved separately while the structured address is incomplete.',
+        'Contact changes cannot currently be saved separately while the structured address is incomplete.',
       ),
       findsOneWidget,
     );

@@ -107,7 +107,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController _firstNameController;
   late final TextEditingController _middleNameController;
   late final TextEditingController _lastNameController;
-  late final TextEditingController _emailController;
   late final TextEditingController _contactController;
   late final TextEditingController _unitController;
   late final TextEditingController _addressController;
@@ -163,7 +162,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _firstNameController = TextEditingController(text: p['first_name'] ?? '');
     _middleNameController = TextEditingController(text: p['middle_name'] ?? '');
     _lastNameController = TextEditingController(text: p['last_name'] ?? '');
-    _emailController = TextEditingController(text: p['email'] ?? '');
     _contactController = TextEditingController(text: p['contact_number'] ?? '');
     _unitController = TextEditingController(
       text: structuredValue('address_unit'),
@@ -196,7 +194,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _firstNameController.dispose();
     _middleNameController.dispose();
     _lastNameController.dispose();
-    _emailController.dispose();
     _contactController.dispose();
     _unitController.dispose();
     _addressController.dispose();
@@ -927,7 +924,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         'middle_name': _middleNameController.text.trim(),
         'last_name': lastName,
         'name': fullName,
-        'email': _emailController.text.trim(),
         'contact_number': _contactController.text.trim(),
         'address': addressValue,
         ...structuredAddressFields,
@@ -1029,7 +1025,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               _middleNameController.text.trim(),
           'last_name': verifiedProfile['last_name'] ?? lastName,
           'name': verifiedProfile['name'] ?? fullName,
-          'email': verifiedProfile['email'] ?? _emailController.text.trim(),
+          'email': verifiedProfile['email'] ?? widget.profile['email'],
           'contact_number':
               verifiedProfile['contact'] ??
               verifiedProfile['contact_number'] ??
@@ -1102,12 +1098,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             ),
             const SizedBox(height: 12),
             TextField(
-              controller: _emailController,
-              decoration: const InputDecoration(labelText: 'Email'),
-              keyboardType: TextInputType.emailAddress,
-            ),
-            const SizedBox(height: 12),
-            TextField(
               controller: _contactController,
               decoration: const InputDecoration(labelText: 'Contact number'),
               keyboardType: TextInputType.phone,
@@ -1145,7 +1135,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Email or contact changes cannot currently be saved separately while the structured address is incomplete.',
+                      'Contact changes cannot currently be saved separately while the structured address is incomplete.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],

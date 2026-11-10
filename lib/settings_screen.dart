@@ -5,14 +5,20 @@ import 'package:http/http.dart' as http;
 
 import 'app_settings.dart';
 import 'constants.dart';
+import 'services/patient_session_service.dart';
 import 'support_service_preview.dart' show SupportServiceScreen;
 import 'terms_and_conditions.dart';
 import 'verification_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final String patientId;
+  final PatientSessionService? sessionService;
 
-  const SettingsScreen({super.key, required this.patientId});
+  const SettingsScreen({
+    super.key,
+    required this.patientId,
+    this.sessionService,
+  });
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -238,9 +244,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _openSupportService() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => const SupportServiceScreen()));
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            SupportServiceScreen(sessionService: widget.sessionService),
+      ),
+    );
   }
 
   @override
@@ -541,7 +550,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   'Support Service',
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
-                subtitle: const Text('View support tickets (preview only)'),
+                subtitle: const Text(
+                  'View support tickets and contact support',
+                ),
                 trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                 onTap: _openSupportService,
               ),

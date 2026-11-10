@@ -1823,9 +1823,12 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  static const int _appointmentsPerPage = 10;
+
   late final PatientSessionService _sessionService =
       widget.sessionService ?? patientSessionService;
   int _selectedIndex = 0;
+  int _currentAppointmentPage = 1;
   int _profileRefreshGeneration = 0;
   bool _exitDialogOpen = false;
 
@@ -1840,6 +1843,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _framesErrorMessage;
 
   List<dynamic> _appointments = [];
+
+  int get _appointmentPageCount =>
+      (_appointments.length / _appointmentsPerPage).ceil();
+
+  List<dynamic> get _currentAppointmentPageItems {
+    final start = (_currentAppointmentPage - 1) * _appointmentsPerPage;
+    return _appointments.skip(start).take(_appointmentsPerPage).toList();
+  }
 
   List<FrameModel> _frames = [];
 
@@ -2091,6 +2102,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // LOAD APPOINTMENTS
   // =====================================================
 
+  DateTime? _appointmentDateTime(dynamic appointment) {
+    if (appointment is! Map) return null;
+
+    final rawDate = appointment['appointment_date']?.toString().trim() ?? '';
+    final rawTime = appointment['appointment_time']?.toString().trim() ?? '';
+    if (rawDate.isEmpty || rawTime.isEmpty) return null;
+
+    return DateTime.tryParse('${rawDate.split('T').first}T$rawTime');
+  }
+
+  List<dynamic> _sortAppointments(List<dynamic> appointments) {
+    final indexedAppointments = List<MapEntry<int, dynamic>>.generate(
+      appointments.length,
+      (index) => MapEntry(index, appointments[index]),
+    );
+
+    indexedAppointments.sort((a, b) {
+      final aDateTime = _appointmentDateTime(a.value);
+      final bDateTime = _appointmentDateTime(b.value);
+      if (aDateTime == null && bDateTime == null) {
+        return a.key.compareTo(b.key);
+      }
+      if (aDateTime == null) return 1;
+      if (bDateTime == null) return -1;
+
+      final byDateTime = bDateTime.compareTo(aDateTime);
+      return byDateTime == 0 ? a.key.compareTo(b.key) : byDateTime;
+    });
+
+    return indexedAppointments
+        .map((entry) => entry.value)
+        .toList(growable: false);
+  }
+
   Future<void> _loadAppointments() async {
     if (!mounted) return;
 
@@ -2102,7 +2147,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (patientId == null || patientId.isEmpty) {
         debugPrint('APPOINTMENTS: No patient ID available.');
 
-        setState(() => _appointments = []);
+        setState(() {
+          _appointments = [];
+          _currentAppointmentPage = 1;
+        });
 
         return;
       }
@@ -2140,7 +2188,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
         if (decoded is List) {
           setState(() {
-            _appointments = decoded;
+            _appointments = _sortAppointments(decoded);
+            _currentAppointmentPage = 1;
           });
 
           debugPrint(
@@ -2156,6 +2205,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
           setState(() {
             _appointments = [];
+            _currentAppointmentPage = 1;
           });
         }
 
@@ -2706,7 +2756,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onTap: () {
                   Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) => const SupportServiceScreen(),
+                      builder: (_) =>
+                          SupportServiceScreen(sessionService: _sessionService),
                     ),
                   );
                 },
@@ -3510,6 +3561,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         : parsedType.isNotEmpty
         ? parsedType
         : 'Appointment';
+    final servicePurpose = purposeOfVisit.isEmpty
+        ? 'Clinic visit'
+        : purposeOfVisit;
 
     final status = normalizeAppointmentStatus(
       data['appointment_status'] ?? data['status'],
@@ -3620,17 +3674,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         const SizedBox(height: 6),
         Text(
-          'Provider: ${parsedProvider.isEmpty ? '-' : parsedProvider}',
-          maxLines: 1,
+          'SERVICE / PURPOSE: $servicePurpose',
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.black87, fontSize: 12),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          'Type: ${parsedType.isEmpty ? '-' : parsedType}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.black87, fontSize: 12),
+          style: const TextStyle(
+            color: Colors.black87,
+            fontSize: 12,
+            height: 1.35,
+          ),
         ),
       ],
     );
@@ -3675,6 +3726,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildAppointmentsTab() {
+    final pageCount = _appointmentPageCount;
+
     return RefreshIndicator(
       onRefresh: _loadAppointments,
       child: ListView(
@@ -3754,9 +3807,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             )
           else
-            ..._appointments.map(
+            ..._currentAppointmentPageItems.map(
               (appointment) =>
                   _buildAppointmentCard(appointment as Map<String, dynamic>),
+            ),
+          if (pageCount > 1)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  OutlinedButton.icon(
+                    key: const ValueKey('appointments-previous-page'),
+                    onPressed: _currentAppointmentPage > 1
+                        ? () => setState(() => _currentAppointmentPage--)
+                        : null,
+                    icon: const Icon(Icons.chevron_left),
+                    label: const Text('Previous'),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Page $_currentAppointmentPage of $pageCount',
+                    key: const ValueKey('appointments-page-indicator'),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    key: const ValueKey('appointments-next-page'),
+                    onPressed: _currentAppointmentPage < pageCount
+                        ? () => setState(() => _currentAppointmentPage++)
+                        : null,
+                    icon: const Icon(Icons.chevron_right),
+                    label: const Text('Next'),
+                  ),
+                ],
+              ),
             ),
         ],
       ),
@@ -4254,8 +4338,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) =>
-                        SettingsScreen(patientId: _profile['patient_id']),
+                    builder: (_) => SettingsScreen(
+                      patientId: _profile['patient_id'],
+                      sessionService: _sessionService,
+                    ),
                   ),
                 );
               },

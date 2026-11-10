@@ -49,6 +49,12 @@ void main() {
               final badgeTextFinder = find.text('CONFIRMED');
               expect(titleFinder, findsOneWidget);
               expect(badgeTextFinder, findsOneWidget);
+              expect(
+                find.text('SERVICE / PURPOSE: Eye Examination'),
+                findsOneWidget,
+              );
+              expect(find.textContaining('Provider:'), findsNothing);
+              expect(find.textContaining('Type:'), findsNothing);
 
               final badgeFinder = find
                   .ancestor(
@@ -121,7 +127,8 @@ void main() {
                   'appointment_time': '10:00',
                   'appointment_status': 'Confirmed',
                   'provider': appointmentTitle,
-                  'appointment_type': 'Eye examination',
+                  'appointment_type': 'General',
+                  'purpose_of_visit': 'Eye Examination',
                 },
               ]),
               200,
