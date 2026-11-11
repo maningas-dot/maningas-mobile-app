@@ -22,9 +22,16 @@ class TransactionHistoryScreen extends StatefulWidget {
 }
 
 class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
+  static const int _transactionsPerPage = 10;
+
   bool _loading = true;
   String? _errorMessage;
   List<_TransactionRecord> _records = [];
+  int _currentPageIndex = 0;
+
+  int get _pageCount => _records.isEmpty
+      ? 0
+      : (_records.length + _transactionsPerPage - 1) ~/ _transactionsPerPage;
 
   @override
   void initState() {
@@ -71,12 +78,36 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                   []
             : const [];
         final list = rawList is List ? rawList : const <dynamic>[];
+        final indexedRecords = list
+            .whereType<Map<String, dynamic>>()
+            .map(_TransactionRecord.fromJson)
+            .toList()
+            .asMap()
+            .entries
+            .toList();
+
+        indexedRecords.sort((left, right) {
+          final leftDate = left.value.transactionDate;
+          final rightDate = right.value.transactionDate;
+
+          if (leftDate == null) {
+            return rightDate == null ? left.key.compareTo(right.key) : 1;
+          }
+          if (rightDate == null) return -1;
+
+          final dateComparison = rightDate.compareTo(leftDate);
+          return dateComparison != 0
+              ? dateComparison
+              : left.key.compareTo(right.key);
+        });
 
         setState(() {
-          _records = list
-              .whereType<Map<String, dynamic>>()
-              .map(_TransactionRecord.fromJson)
-              .toList();
+          _records = indexedRecords.map((entry) => entry.value).toList();
+          if (_records.isEmpty) {
+            _currentPageIndex = 0;
+          } else if (_currentPageIndex >= _pageCount) {
+            _currentPageIndex = _pageCount - 1;
+          }
           _loading = false;
           _errorMessage = null;
         });
@@ -200,13 +231,83 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                     ),
                   )
                 : ListView.separated(
+                    key: ValueKey(_currentPageIndex),
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    itemCount: _records.length,
+                    itemCount: _currentPageRecords.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 12),
                     itemBuilder: (context, index) {
-                      return _buildTransactionCard(_records[index]);
+                      return _buildTransactionCard(_currentPageRecords[index]);
                     },
                   ),
+          ),
+          if (!_loading && _errorMessage == null && _records.isNotEmpty)
+            _buildPaginationControls(),
+        ],
+      ),
+    );
+  }
+
+  List<_TransactionRecord> get _currentPageRecords {
+    final startIndex = _currentPageIndex * _transactionsPerPage;
+    final endIndex = startIndex + _transactionsPerPage < _records.length
+        ? startIndex + _transactionsPerPage
+        : _records.length;
+    return _records.sublist(startIndex, endIndex);
+  }
+
+  Widget _buildPaginationControls() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Page ${_currentPageIndex + 1} of $_pageCount',
+            key: const ValueKey('transaction-page-indicator'),
+            style: const TextStyle(
+              color: Colors.black54,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: const ValueKey('transaction-previous-page'),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                    ),
+                    onPressed: _currentPageIndex > 0
+                        ? () => setState(() => _currentPageIndex--)
+                        : null,
+                    icon: const Icon(Icons.chevron_left),
+                    label: const Text('Previous'),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    key: const ValueKey('transaction-next-page'),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                    ),
+                    onPressed: _currentPageIndex < _pageCount - 1
+                        ? () => setState(() => _currentPageIndex++)
+                        : null,
+                    icon: const Icon(Icons.chevron_right),
+                    label: const Text('Next'),
+                    iconAlignment: IconAlignment.end,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -391,6 +492,7 @@ class _TransactionRecord {
   final String title;
   final String? subtitle;
   final String? referenceLabel;
+  final DateTime? transactionDate;
   final String dateLabel;
   final String amountLabel;
   final String? totalAmountLabel;
@@ -412,6 +514,7 @@ class _TransactionRecord {
     required this.title,
     required this.subtitle,
     required this.referenceLabel,
+    required this.transactionDate,
     required this.dateLabel,
     required this.amountLabel,
     required this.totalAmountLabel,
@@ -486,12 +589,14 @@ class _TransactionRecord {
         json['datetime']?.toString() ??
         '';
 
+    final transactionDate = DateTime.tryParse(rawDate);
     final dateLabel = rawDate.isEmpty ? 'Recently' : _formatDateLabel(rawDate);
 
     return _TransactionRecord(
       title: title,
       subtitle: subtitle,
       referenceLabel: reference == null ? null : 'Ref: $reference',
+      transactionDate: transactionDate,
       dateLabel: dateLabel,
       amountLabel: totalAmountLabel ?? 'Amount unavailable',
       totalAmountLabel: totalAmountLabel,

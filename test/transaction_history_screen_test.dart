@@ -130,6 +130,157 @@ void main() {
       expect(find.text('Total'), findsNothing);
     },
   );
+
+  testWidgets('shows ten newest transactions per page with working controls', (
+    tester,
+  ) async {
+    await _pumpWithTransactions(tester, patientId, {
+      'transactions': _transactions(12),
+    });
+
+    expect(find.text('Page 1 of 2'), findsOneWidget);
+    expect(_buttonIsEnabled(tester, 'transaction-previous-page'), isFalse);
+    expect(_buttonIsEnabled(tester, 'transaction-next-page'), isTrue);
+    expect(find.text('Ref: 12'), findsOneWidget);
+
+    await tester.scrollUntilVisible(find.text('Ref: 3'), 300);
+    expect(find.text('Ref: 3'), findsOneWidget);
+    expect(find.text('Ref: 2'), findsNothing);
+    expect(find.text('Ref: 1'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('transaction-next-page')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Page 2 of 2'), findsOneWidget);
+    expect(_buttonIsEnabled(tester, 'transaction-previous-page'), isTrue);
+    expect(_buttonIsEnabled(tester, 'transaction-next-page'), isFalse);
+    expect(find.text('Ref: 2'), findsOneWidget);
+    expect(find.text('Ref: 1'), findsOneWidget);
+    expect(find.text('Ref: 3'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('transaction-previous-page')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Page 1 of 2'), findsOneWidget);
+    expect(find.text('Ref: 12'), findsOneWidget);
+    expect(find.text('Ref: 2'), findsNothing);
+  });
+
+  testWidgets('sorts newest first across page boundaries', (tester) async {
+    final transactions = _transactions(12).reversed.toList();
+    await _pumpWithTransactions(tester, patientId, {
+      'transactions': transactions,
+    });
+
+    expect(find.text('Ref: 12'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Ref: 3'), 300);
+    expect(find.text('Ref: 3'), findsOneWidget);
+    expect(find.text('Ref: 2'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('transaction-next-page')));
+    await tester.pumpAndSettle();
+    expect(find.text('Ref: 2'), findsOneWidget);
+    expect(find.text('Ref: 1'), findsOneWidget);
+  });
+
+  testWidgets('preserves input order for transactions with equal dates', (
+    tester,
+  ) async {
+    _useTallViewport(tester);
+    await _pumpWithTransactions(tester, patientId, {
+      'transactions': [
+        _transaction(51, '2025-03-01T10:00:00Z'),
+        _transaction(52, '2025-03-01T10:00:00Z'),
+        _transaction(53, '2025-03-01T10:00:00Z'),
+      ],
+    });
+
+    _expectReferenceOrder(tester, [51, 52, 53]);
+  });
+
+  testWidgets('places missing and invalid dates last in stable order', (
+    tester,
+  ) async {
+    _useTallViewport(tester);
+    await _pumpWithTransactions(tester, patientId, {
+      'transactions': [
+        _transaction(61, 'not-a-date'),
+        _transaction(62, '2025-03-01T10:00:00Z'),
+        {'transaction_id': 63, 'title': 'Transaction 63'},
+        _transaction(64, '2024-03-01T10:00:00Z'),
+      ],
+    });
+
+    _expectReferenceOrder(tester, [62, 64, 61, 63]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows a single disabled page for fewer than ten transactions', (
+    tester,
+  ) async {
+    await _pumpWithTransactions(tester, patientId, {
+      'transactions': _transactions(3),
+    });
+
+    expect(find.text('Page 1 of 1'), findsOneWidget);
+    expect(_buttonIsEnabled(tester, 'transaction-previous-page'), isFalse);
+    expect(_buttonIsEnabled(tester, 'transaction-next-page'), isFalse);
+  });
+
+  testWidgets('empty transaction response hides pagination controls', (
+    tester,
+  ) async {
+    await _pumpWithTransactions(tester, patientId, {'transactions': []});
+
+    expect(find.text('No transactions yet.'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('transaction-previous-page')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('transaction-next-page')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('transaction-page-indicator')),
+      findsNothing,
+    );
+  });
+}
+
+List<Map<String, dynamic>> _transactions(int count) {
+  return List.generate(count, (index) {
+    final id = index + 1;
+    final date = DateTime.utc(2025, 1, 1).add(Duration(days: id));
+    return _transaction(id, date.toIso8601String());
+  });
+}
+
+Map<String, dynamic> _transaction(int id, String date) {
+  return {
+    'transaction_id': id,
+    'title': 'Transaction $id',
+    'amount': id * 100,
+    'payment_status': 'Paid',
+    'created_at': date,
+  };
+}
+
+bool _buttonIsEnabled(WidgetTester tester, String key) {
+  return tester.widget<TextButton>(find.byKey(ValueKey(key))).onPressed != null;
+}
+
+void _useTallViewport(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 1200);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+void _expectReferenceOrder(WidgetTester tester, List<int> transactionIds) {
+  final topOffsets = transactionIds
+      .map((id) => tester.getTopLeft(find.text('Ref: $id')).dy)
+      .toList();
+  for (var index = 1; index < topOffsets.length; index++) {
+    expect(topOffsets[index - 1], lessThan(topOffsets[index]));
+  }
 }
 
 Future<void> _pumpWithTransactions(
