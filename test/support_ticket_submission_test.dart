@@ -78,6 +78,19 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: NewTicketScreen(supportCenterService: service)),
     );
+    final submitButton = tester.widget<ElevatedButton>(
+      find.byKey(const ValueKey('support-ticket-submit')),
+    );
+    expect(submitButton.onPressed, isNotNull);
+    expect(
+      submitButton.style?.backgroundColor?.resolve(const <WidgetState>{}),
+      const Color(0xFF0F76FF),
+    );
+    expect(
+      submitButton.style?.foregroundColor?.resolve(const <WidgetState>{}),
+      Colors.white,
+    );
+
     await tester.tap(find.byKey(const ValueKey('support-ticket-submit')));
     await tester.pumpAndSettle();
 

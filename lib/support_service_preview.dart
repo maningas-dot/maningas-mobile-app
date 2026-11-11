@@ -973,6 +973,8 @@ class _NewTicketScreenState extends State<NewTicketScreen> {
                   key: const ValueKey('support-ticket-submit'),
                   onPressed: _isSubmitting ? null : _submit,
                   style: ElevatedButton.styleFrom(
+                    backgroundColor: _previewBlue,
+                    foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
                   child: _isSubmitting

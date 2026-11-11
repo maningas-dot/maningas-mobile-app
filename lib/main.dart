@@ -7,6 +7,7 @@ import 'package:ph_address_finder/ph_address_finder.dart';
 import 'appointment_scheduler.dart';
 import 'app_settings.dart';
 import 'constants.dart';
+import 'currency_format.dart';
 import 'notification_screen.dart';
 import 'settings_screen.dart';
 import 'edit_profile_screen.dart';
@@ -19,6 +20,8 @@ import 'zip_code_lookup.dart';
 import 'forgot_password_screen.dart';
 import 'services/patient_session_service.dart';
 import 'support_service_preview.dart' show SupportServiceScreen;
+
+export 'currency_format.dart' show formatPhilippinePeso;
 
 class Main {
   static const String baseUrl = 'https://api.gonzalesvisionclinic.com';
@@ -67,6 +70,42 @@ Map<String, dynamic> nameFieldsFromLoginResponse(Map<String, dynamic> data) {
   return fields;
 }
 
+String normalizeGmailAddress(String? value) =>
+    (value ?? '').trim().toLowerCase();
+
+bool isValidGmailAddress(String? value) {
+  final email = normalizeGmailAddress(value);
+  if (email.isEmpty || email.length > 254) return false;
+
+  final atIndex = email.indexOf('@');
+  if (atIndex <= 0 ||
+      atIndex != email.lastIndexOf('@') ||
+      email.substring(atIndex + 1) != 'gmail.com') {
+    return false;
+  }
+
+  final localPart = email.substring(0, atIndex);
+  if (localPart.length > 64) return false;
+  return RegExp(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$",
+  ).hasMatch(localPart);
+}
+
+enum RegistrationEmailVerificationState { verified, requiresOtp, unknown }
+
+RegistrationEmailVerificationState registrationEmailVerificationState(
+  Map<String, dynamic> response,
+) {
+  if (response['requires_email_verification'] == true ||
+      response['email_verified'] == false) {
+    return RegistrationEmailVerificationState.requiresOtp;
+  }
+  if (response['email_verified'] == true) {
+    return RegistrationEmailVerificationState.verified;
+  }
+  return RegistrationEmailVerificationState.unknown;
+}
+
 Map<String, dynamic> _profileDataFromPatient(Map<String, dynamic> patient) {
   final data = patientProfileFromResponse(patient);
   final patientId = data['patient_id'] ?? data['user_id'] ?? data['id'];
@@ -77,7 +116,7 @@ Map<String, dynamic> _profileDataFromPatient(Map<String, dynamic> patient) {
   return {
     'patient_id': patientId,
     'email': data['email'] ?? '',
-    'email_verified': data['email_verified'] ?? true,
+    'email_verified': data['email_verified'] ?? false,
     ...nameFieldsFromLoginResponse(data),
     'contact_number':
         data['contact_number'] ?? data['contact'] ?? data['phone'] ?? '',
@@ -833,7 +872,7 @@ class _AuthScreenState extends State<AuthScreen> {
             ? _calculateAge(_selectedDateOfBirth!)
             : 0;
 
-        final registrationEmail = _emailController.text.trim().toLowerCase();
+        final registrationEmail = normalizeGmailAddress(_emailController.text);
 
         final rawContact = _contactController.text.trim();
 
@@ -919,15 +958,14 @@ class _AuthScreenState extends State<AuthScreen> {
         if (!mounted) return;
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
-          final requiresVerification =
-              data['requires_email_verification'] == true ||
-              data['email_verified'] == false;
+          final verificationState = registrationEmailVerificationState(data);
 
           // =================================================
           // EMAIL VERIFICATION
           // =================================================
 
-          if (requiresVerification) {
+          if (verificationState ==
+              RegistrationEmailVerificationState.requiresOtp) {
             final verified = await Navigator.of(context).push<bool>(
               MaterialPageRoute(
                 builder: (_) => VerificationPage(
@@ -962,9 +1000,29 @@ class _AuthScreenState extends State<AuthScreen> {
             return;
           }
 
+          if (verificationState == RegistrationEmailVerificationState.unknown) {
+            _passwordController.clear();
+            _confirmPasswordController.clear();
+            setState(() {
+              _isLogin = true;
+              _acceptedTerms = false;
+              _emailController.text = registrationEmail;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Registration was accepted, but the server did not confirm '
+                  'email verification. Sign in to check your account status; '
+                  'complete verification if prompted.',
+                ),
+                duration: Duration(seconds: 8),
+              ),
+            );
+            return;
+          }
+
           // =================================================
-          // FALLBACK FOR ACCOUNTS THAT DO NOT REQUIRE
-          // EMAIL VERIFICATION
+          // EMAIL VERIFIED BY THE SERVER
           // =================================================
 
           ScaffoldMessenger.of(context).showSnackBar(
@@ -1204,8 +1262,13 @@ class _AuthScreenState extends State<AuthScreen> {
                             return 'Enter email';
                           }
 
-                          if (!value.contains('@')) {
-                            return 'Enter a valid email';
+                          if (_isLogin) {
+                            if (!value.contains('@')) {
+                              return 'Enter a valid email';
+                            }
+                          } else if (!isValidGmailAddress(value)) {
+                            return 'Enter a valid Gmail address. Only '
+                                '@gmail.com addresses are accepted.';
                           }
 
                           return null;
@@ -1792,20 +1855,6 @@ double? parseFramePrice(dynamic rawPrice) {
   return price != null && price.isFinite ? price : null;
 }
 
-String formatPhilippinePeso(double? price) {
-  if (price == null || !price.isFinite) return 'Price unavailable';
-
-  final fixedPrice = price.abs().toStringAsFixed(2);
-  final decimalIndex = fixedPrice.indexOf('.');
-  final integerPart = fixedPrice.substring(0, decimalIndex);
-  final groupedInteger = integerPart.replaceAllMapped(
-    RegExp(r'\B(?=(\d{3})+(?!\d))'),
-    (_) => ',',
-  );
-  final sign = price < 0 ? '-' : '';
-  return '₱$sign$groupedInteger${fixedPrice.substring(decimalIndex)}';
-}
-
 class DashboardScreen extends StatefulWidget {
   final Map<String, dynamic> profileData;
   final PatientSessionService? sessionService;
@@ -1843,6 +1892,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _framesErrorMessage;
 
   List<dynamic> _appointments = [];
+  final Set<String> _appointmentCancellationDialogsOpen = {};
+  final Set<String> _cancellingAppointmentIds = {};
 
   int get _appointmentPageCount =>
       (_appointments.length / _appointmentsPerPage).ceil();
@@ -2248,6 +2299,167 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } finally {
       if (mounted) {
         setState(() => _loadingAppointments = false);
+      }
+    }
+  }
+
+  Future<void> _cancelAppointment(Map<String, dynamic> appointment) async {
+    final appointmentId =
+        appointment['appointment_id']?.toString().trim() ?? '';
+    final patientId = _profile['patient_id']?.toString().trim() ?? '';
+    if (appointmentId.isEmpty ||
+        patientId.isEmpty ||
+        _appointmentCancellationDialogsOpen.contains(appointmentId) ||
+        _cancellingAppointmentIds.contains(appointmentId) ||
+        !isAppointmentCancellationEligible(appointment)) {
+      return;
+    }
+
+    _appointmentCancellationDialogsOpen.add(appointmentId);
+    bool? confirmed;
+    try {
+      confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Cancel Appointment?'),
+          content: const Text(
+            'Are you sure you want to cancel this appointment? '
+            'This action cannot be undone.',
+          ),
+          actions: [
+            TextButton(
+              key: ValueKey('appointment-cancel-dismiss-$appointmentId'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Keep Appointment'),
+            ),
+            TextButton(
+              key: ValueKey('appointment-cancel-confirm-$appointmentId'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Cancel Appointment'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _appointmentCancellationDialogsOpen.remove(appointmentId);
+    }
+
+    if (confirmed != true || !mounted) return;
+
+    final latestPatientId = _profile['patient_id']?.toString().trim() ?? '';
+    if (latestPatientId.isEmpty ||
+        latestPatientId != patientId ||
+        !isAppointmentCancellationEligible(appointment)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This appointment is no longer eligible for cancellation. '
+            'Refresh the appointment list and try again.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _cancellingAppointmentIds.add(appointmentId));
+    try {
+      final uri = Uri.parse(
+        '$apiBaseUrl/api/appointments/patient/'
+        '${Uri.encodeComponent(appointmentId)}/cancel',
+      );
+      final response = await http
+          .patch(
+            uri,
+            headers: jsonHeaders,
+            body: jsonEncode({'patient_id': patientId}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      Map<String, dynamic> responseData = {};
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map<String, dynamic>) {
+          responseData = decoded;
+        }
+      } on FormatException {
+        debugPrint('APPOINTMENT CANCELLATION: Invalid JSON response.');
+      }
+
+      if (response.statusCode != 200 || responseData['success'] != true) {
+        final message = switch (response.statusCode) {
+          400 =>
+            'The cancellation request was invalid. Refresh the appointment '
+                'list and try again.',
+          404 =>
+            'This appointment could not be found for your account. '
+                'Refresh the appointment list.',
+          409 => 'This appointment can no longer be cancelled.',
+          500 =>
+            'The clinic could not cancel this appointment. Please try again.',
+          _ =>
+            (responseData['message'] ?? responseData['error'])?.toString() ??
+                'The appointment could not be cancelled. Please try again.',
+        };
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(message)));
+        }
+        return;
+      }
+
+      await _loadAppointments();
+
+      var availabilityRefreshed = false;
+      try {
+        final availabilityResponse = await http
+            .get(
+              Uri.parse('$apiBaseUrl/api/appointments'),
+              headers: jsonHeaders,
+            )
+            .timeout(const Duration(seconds: 15));
+        if (availabilityResponse.statusCode < 200 ||
+            availabilityResponse.statusCode >= 300 ||
+            jsonDecode(availabilityResponse.body) is! List) {
+          throw const FormatException(
+            'Invalid appointment availability response.',
+          );
+        }
+        availabilityRefreshed = true;
+      } catch (error, stackTrace) {
+        debugPrint('APPOINTMENT AVAILABILITY REFRESH ERROR: $error');
+        debugPrint('APPOINTMENT AVAILABILITY REFRESH STACK: $stackTrace');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              availabilityRefreshed
+                  ? 'Appointment cancelled.'
+                  : 'Appointment cancelled, but availability could not be '
+                        'refreshed. Reopen the scheduler before booking.',
+            ),
+          ),
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('APPOINTMENT CANCELLATION ERROR: $error');
+      debugPrint('APPOINTMENT CANCELLATION STACK: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Unable to cancel this appointment right now. Please try again.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _cancellingAppointmentIds.remove(appointmentId));
+      } else {
+        _cancellingAppointmentIds.remove(appointmentId);
       }
     }
   }
@@ -3683,6 +3895,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
             height: 1.35,
           ),
         ),
+        if (data['appointment_id'] != null &&
+            data['appointment_id'].toString().trim().isNotEmpty &&
+            isAppointmentCancellationEligible(data))
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: ValueKey(
+                'appointment-cancel-${data['appointment_id'].toString()}',
+              ),
+              onPressed:
+                  _cancellingAppointmentIds.contains(
+                    data['appointment_id'].toString().trim(),
+                  )
+                  ? null
+                  : () => _cancelAppointment(data),
+              icon:
+                  _cancellingAppointmentIds.contains(
+                    data['appointment_id'].toString().trim(),
+                  )
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cancel_outlined),
+              label: const Text('Cancel Appointment'),
+              style: TextButton.styleFrom(foregroundColor: Colors.red.shade700),
+            ),
+          ),
       ],
     );
 

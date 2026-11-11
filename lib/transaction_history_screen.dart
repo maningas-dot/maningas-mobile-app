@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'constants.dart';
+import 'currency_format.dart';
 
 class TransactionHistoryScreen extends StatefulWidget {
   final String? patientId;
@@ -510,7 +511,7 @@ class _TransactionRecord {
 
     if (rawValue is num) {
       if (!rawValue.isFinite) return null;
-      return '₱${rawValue.toStringAsFixed(2)}';
+      return formatPhilippinePeso(rawValue.toDouble());
     }
 
     final trimmed = rawValue.toString().trim();
@@ -520,7 +521,7 @@ class _TransactionRecord {
 
     final numeric = double.tryParse(trimmed.replaceAll(',', ''));
     if (numeric != null && numeric.isFinite) {
-      return '₱${numeric.toStringAsFixed(2)}';
+      return formatPhilippinePeso(numeric);
     }
 
     return null;

@@ -42,6 +42,30 @@ bool isAppointmentStatusBlocking(dynamic status) {
   }.contains(normalized);
 }
 
+bool isAppointmentCancellationEligible(dynamic appointment, {DateTime? now}) {
+  if (appointment is! Map) return false;
+
+  final status =
+      (appointment['appointment_status'] ?? appointment['status'])
+          ?.toString()
+          .trim()
+          .toLowerCase() ??
+      '';
+  if (!const {'requested', 'pending', 'confirmed'}.contains(status)) {
+    return false;
+  }
+
+  final rawDate = appointment['appointment_date']?.toString().trim() ?? '';
+  final rawTime = appointment['appointment_time']?.toString().trim() ?? '';
+  if (rawDate.isEmpty || rawTime.isEmpty) return false;
+
+  final appointmentDateTime = DateTime.tryParse(
+    '${rawDate.split('T').first}T${rawTime.split('T').last}',
+  );
+  return appointmentDateTime != null &&
+      appointmentDateTime.isAfter(now ?? DateTime.now());
+}
+
 String appointmentSlotKey(DateTime date, TimeOfDay time) =>
     '${date.year.toString().padLeft(4, '0')}-'
     '${date.month.toString().padLeft(2, '0')}-'
@@ -1930,9 +1954,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
         onPressed: _showAppointmentTerms,
         icon: const Icon(Icons.info_outline, size: 18),
         label: const Text('View Appointment Terms & Conditions'),
-        style: TextButton.styleFrom(
-          foregroundColor: const Color(0xFF0F76FF),
-        ),
+        style: TextButton.styleFrom(foregroundColor: const Color(0xFF0F76FF)),
       ),
     );
   }

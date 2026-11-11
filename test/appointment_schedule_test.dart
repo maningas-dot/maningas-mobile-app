@@ -112,6 +112,63 @@ void main() {
     },
   );
 
+  test('cancellation eligibility requires a future supported appointment', () {
+    final now = DateTime(2026, 11, 12, 9);
+    for (final status in [' Requested ', 'Pending', 'CONFIRMED']) {
+      expect(
+        isAppointmentCancellationEligible({
+          'appointment_status': status,
+          'appointment_date': '2026-11-12',
+          'appointment_time': '09:01:00',
+        }, now: now),
+        isTrue,
+      );
+    }
+
+    for (final status in [
+      'Cancelled',
+      'Rejected',
+      'Approved',
+      'Scheduled',
+      'Accepted',
+      'Other',
+    ]) {
+      expect(
+        isAppointmentCancellationEligible({
+          'appointment_status': status,
+          'appointment_date': '2026-11-12',
+          'appointment_time': '10:00:00',
+        }, now: now),
+        isFalse,
+      );
+    }
+
+    expect(
+      isAppointmentCancellationEligible({
+        'appointment_status': 'Confirmed',
+        'appointment_date': '2026-11-12',
+        'appointment_time': '09:00:00',
+      }, now: now),
+      isFalse,
+    );
+    expect(
+      isAppointmentCancellationEligible({
+        'appointment_status': 'Pending',
+        'appointment_date': '2026-11-11',
+        'appointment_time': '10:00:00',
+      }, now: now),
+      isFalse,
+    );
+    expect(
+      isAppointmentCancellationEligible({
+        'appointment_status': 'Pending',
+        'appointment_date': 'invalid',
+        'appointment_time': '10:00',
+      }, now: now),
+      isFalse,
+    );
+  });
+
   test('a date is fully unavailable only when every slot is blocked', () {
     final date = DateTime(2026, 10, 6);
     final now = DateTime(2026, 10, 5, 12);

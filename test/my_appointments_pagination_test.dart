@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -159,6 +160,307 @@ void main() {
       },
     );
   });
+
+  testWidgets('shows cancellation only for eligible future appointments', (
+    tester,
+  ) async {
+    final today = DateTime.now();
+    final appointments = [
+      for (final status in [' Requested ', 'Pending', 'CONFIRMED'])
+        _futureAppointment(status, status: status),
+      for (final status in [
+        'Cancelled',
+        'Rejected',
+        'Approved',
+        'Scheduled',
+        'Accepted',
+      ])
+        _futureAppointment(status, status: status),
+      {
+        ..._futureAppointment('past'),
+        'appointment_date': today
+            .subtract(const Duration(days: 1))
+            .toIso8601String()
+            .split('T')
+            .first,
+      },
+    ];
+
+    await _withDashboard(tester, (_) async {
+      for (final id in [' Requested ', 'Pending', 'CONFIRMED']) {
+        expect(find.byKey(ValueKey('appointment-cancel-$id')), findsOneWidget);
+      }
+      for (final id in [
+        'Cancelled',
+        'Rejected',
+        'Approved',
+        'Scheduled',
+        'Accepted',
+        'past',
+      ]) {
+        expect(find.byKey(ValueKey('appointment-cancel-$id')), findsNothing);
+      }
+    }, (_) async => _jsonResponse(200, appointments));
+  });
+
+  testWidgets('dismissing cancellation confirmation sends no request', (
+    tester,
+  ) async {
+    var cancellationRequests = 0;
+    await _withDashboard(
+      tester,
+      (_) async {
+        final action = find.byKey(const ValueKey('appointment-cancel-42'));
+        await tester.ensureVisible(action);
+        await tester.tap(action);
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('This action cannot be undone.'),
+          findsOneWidget,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('appointment-cancel-dismiss-42')),
+        );
+        await tester.pumpAndSettle();
+        expect(cancellationRequests, 0);
+        expect(find.text('CONFIRMED'), findsOneWidget);
+      },
+      (_) async => _jsonResponse(200, [_futureAppointment('42')]),
+      otherRequestHandler: (request) async {
+        if (request.method == 'PATCH') cancellationRequests++;
+        return _defaultDashboardResponse(request);
+      },
+    );
+  });
+
+  testWidgets(
+    'confirmation sends the verified request and refreshes list and availability',
+    (tester) async {
+      var cancelled = false;
+      var appointmentListFetches = 0;
+      var availabilityFetches = 0;
+      http.Request? cancellationRequest;
+      final appointment = _futureAppointment('42');
+      await _withDashboard(
+        tester,
+        (_) async {
+          final action = find.byKey(const ValueKey('appointment-cancel-42'));
+          await tester.ensureVisible(action);
+          await tester.tap(action);
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const ValueKey('appointment-cancel-confirm-42')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(cancellationRequest, isNotNull);
+          expect(cancellationRequest!.method, 'PATCH');
+          expect(
+            cancellationRequest!.url.path,
+            '/api/appointments/patient/42/cancel',
+          );
+          expect(
+            cancellationRequest!.headers['content-type'],
+            'application/json',
+          );
+          expect(cancellationRequest!.headers['accept'], 'application/json');
+          expect(jsonDecode(cancellationRequest!.body), {
+            'patient_id': 'patient-test',
+          });
+          expect(appointmentListFetches, 2);
+          expect(availabilityFetches, 1);
+          expect(find.text('CANCELLED'), findsOneWidget);
+          expect(find.text('Appointment cancelled.'), findsOneWidget);
+          expect(
+            isAppointmentStatusBlocking(
+              cancelled ? 'Cancelled' : appointment['appointment_status'],
+            ),
+            isFalse,
+          );
+        },
+        (_) async {
+          appointmentListFetches++;
+          return _jsonResponse(200, [
+            cancelled
+                ? {...appointment, 'appointment_status': 'Cancelled'}
+                : appointment,
+          ]);
+        },
+        otherRequestHandler: (request) async {
+          if (request.method == 'PATCH') {
+            cancellationRequest = request;
+            cancelled = true;
+            return _jsonResponse(200, {
+              'success': true,
+              'appointment_status': 'Cancelled',
+              'booking_slot_released': true,
+            });
+          }
+          if (request.method == 'GET' &&
+              request.url.path == '/api/appointments') {
+            availabilityFetches++;
+            return _jsonResponse(200, [
+              {...appointment, 'appointment_status': 'Cancelled'},
+            ]);
+          }
+          return _defaultDashboardResponse(request);
+        },
+      );
+    },
+  );
+
+  for (final (statusCode, expectedMessage) in [
+    (400, 'The cancellation request was invalid.'),
+    (404, 'This appointment could not be found'),
+    (409, 'This appointment can no longer be cancelled.'),
+    (500, 'The clinic could not cancel this appointment.'),
+  ]) {
+    testWidgets('cancellation HTTP $statusCode does not change status', (
+      tester,
+    ) async {
+      var appointmentListFetches = 0;
+      await _withDashboard(
+        tester,
+        (_) async {
+          final action = find.byKey(const ValueKey('appointment-cancel-42'));
+          await tester.ensureVisible(action);
+          await tester.tap(action);
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const ValueKey('appointment-cancel-confirm-42')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(find.text('PENDING'), findsOneWidget);
+          expect(find.textContaining(expectedMessage), findsOneWidget);
+          expect(appointmentListFetches, 1);
+        },
+        (_) async {
+          appointmentListFetches++;
+          return _jsonResponse(200, [
+            _futureAppointment('42', status: 'Requested'),
+          ]);
+        },
+        otherRequestHandler: (request) async {
+          if (request.method == 'PATCH') {
+            return _jsonResponse(statusCode, {'error': 'Server response'});
+          }
+          return _defaultDashboardResponse(request);
+        },
+      );
+    });
+  }
+
+  testWidgets('duplicate cancellation requests are prevented', (tester) async {
+    final cancellationResponse = Completer<http.Response>();
+    var cancellationRequests = 0;
+    await _withDashboard(
+      tester,
+      (_) async {
+        final action = find.byKey(const ValueKey('appointment-cancel-42'));
+        await tester.ensureVisible(action);
+        await tester.tap(action);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('appointment-cancel-confirm-42')),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(cancellationRequests, 1);
+        final actionButton = tester.widget<TextButton>(
+          find.byKey(const ValueKey('appointment-cancel-42')),
+        );
+        expect(actionButton.onPressed, isNull);
+
+        cancellationResponse.complete(
+          _jsonResponse(200, {
+            'success': true,
+            'appointment_status': 'Cancelled',
+            'booking_slot_released': true,
+          }),
+        );
+        await tester.pumpAndSettle();
+        expect(cancellationRequests, 1);
+      },
+      (_) async => _jsonResponse(200, [_futureAppointment('42')]),
+      otherRequestHandler: (request) async {
+        if (request.method == 'PATCH') {
+          cancellationRequests++;
+          return cancellationResponse.future;
+        }
+        if (request.method == 'GET' &&
+            request.url.path == '/api/appointments') {
+          return _jsonResponse(200, []);
+        }
+        return _defaultDashboardResponse(request);
+      },
+    );
+  });
+
+  testWidgets(
+    'cancellation refresh preserves sorting and ten-item pagination',
+    (tester) async {
+      var cancelled = false;
+      final appointments = List.generate(
+        11,
+        (index) => _futureAppointment('$index', daysFromNow: index + 1),
+      );
+      await _withDashboard(
+        tester,
+        (_) async {
+          expect(find.text('Page 1 of 2'), findsOneWidget);
+          await tester.ensureVisible(
+            find.byKey(const ValueKey('appointments-next-page')),
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('appointments-next-page')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Appointment 0'), findsOneWidget);
+
+          final action = find.byKey(const ValueKey('appointment-cancel-0'));
+          await tester.ensureVisible(action);
+          await tester.tap(action);
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const ValueKey('appointment-cancel-confirm-0')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(find.text('Page 1 of 2'), findsOneWidget);
+          for (var index = 10; index >= 1; index--) {
+            expect(find.text('Appointment $index'), findsOneWidget);
+          }
+          expect(find.text('Appointment 0'), findsNothing);
+        },
+        (_) async => _jsonResponse(
+          200,
+          appointments.map((appointment) {
+            return cancelled && appointment['appointment_id'] == '0'
+                ? {...appointment, 'appointment_status': 'Cancelled'}
+                : appointment;
+          }).toList(),
+        ),
+        otherRequestHandler: (request) async {
+          if (request.method == 'PATCH') {
+            cancelled = true;
+            return _jsonResponse(200, {
+              'success': true,
+              'appointment_status': 'Cancelled',
+              'booking_slot_released': true,
+            });
+          }
+          if (request.method == 'GET' &&
+              request.url.path == '/api/appointments') {
+            return _jsonResponse(200, [
+              {...appointments.last, 'appointment_status': 'Cancelled'},
+            ]);
+          }
+          return _defaultDashboardResponse(request);
+        },
+      );
+    },
+  );
 
   testWidgets('refresh sorts updated results and resets to page one', (
     tester,
@@ -368,6 +670,23 @@ List<Map<String, dynamic>> _appointments(int count, {int year = 2026}) =>
         '10:00',
       ),
     );
+
+Map<String, dynamic> _futureAppointment(
+  String id, {
+  String status = 'Confirmed',
+  int daysFromNow = 2,
+}) {
+  final date = DateTime.now()
+      .add(Duration(days: daysFromNow))
+      .toIso8601String()
+      .split('T')
+      .first;
+  return {
+    ..._appointment('Appointment $id', date, '23:59'),
+    'appointment_id': id,
+    'appointment_status': status,
+  };
+}
 
 Map<String, dynamic> _appointment(String name, String date, String time) => {
   'appointment_date': date,

@@ -72,6 +72,37 @@ void main() {
   });
 
   testWidgets(
+    'groups thousands in transaction, item, subtotal, VAT, and total amounts',
+    (tester) async {
+      await _pumpWithTransactions(tester, patientId, {
+        'success': true,
+        'transactions': [
+          {
+            'transaction_id': 45,
+            'purpose_of_visit': 'Direct Purchase',
+            'amount': 1000000,
+            'subtotal': '5000.00',
+            'vat_amount': 600,
+            'total_amount': 1000000,
+            'payment_status': 'Paid',
+            'items': [
+              {'item_name': 'Item 1', 'quantity': 1, 'unit_price': 5600},
+              {'item_name': 'Item 2', 'quantity': 2, 'unit_price': 2500},
+              {'item_name': 'Item 3', 'quantity': 1, 'unit_price': 600},
+              {'item_name': 'Item 4', 'quantity': 1, 'unit_price': 1000000},
+            ],
+          },
+        ],
+      });
+
+      expect(find.text('₱5,600.00'), findsOneWidget);
+      expect(find.text('₱5,000.00'), findsNWidgets(2));
+      expect(find.text('₱600.00'), findsNWidgets(2));
+      expect(find.text('₱1,000,000.00'), findsNWidgets(3));
+    },
+  );
+
+  testWidgets(
     'does not substitute zero or fabricated details for missing values',
     (tester) async {
       await _pumpWithTransactions(tester, patientId, {
