@@ -16,52 +16,6 @@ const Map<String, String> _jsonHeaders = {
 
 const Color _saveButtonBlue = Color(0xFF0F76FF);
 
-String _addressCharacterKind(int? rune) {
-  if (rune == null) return 'end';
-  final character = String.fromCharCode(rune);
-  if (character.trim().isEmpty) return 'whitespace';
-  if (!RegExp(r'^[A-Za-z0-9]$').hasMatch(character)) {
-    return 'punctuation-or-symbol';
-  }
-  return 'letter-or-digit';
-}
-
-String _addressDifferenceDiagnostic(String submitted, String returned) {
-  final submittedRunes = submitted.runes.toList();
-  final returnedRunes = returned.runes.toList();
-  final commonLength = submittedRunes.length < returnedRunes.length
-      ? submittedRunes.length
-      : returnedRunes.length;
-  var index = 0;
-  while (index < commonLength &&
-      submittedRunes[index] == returnedRunes[index]) {
-    index++;
-  }
-  if (index == commonLength && submittedRunes.length == returnedRunes.length) {
-    return 'firstDiffIndex=none';
-  }
-  final submittedRune = index < submittedRunes.length
-      ? submittedRunes[index]
-      : null;
-  final returnedRune = index < returnedRunes.length
-      ? returnedRunes[index]
-      : null;
-  return 'firstDiffIndex=$index, '
-      'submittedCharKind=${_addressCharacterKind(submittedRune)}, '
-      'returnedCharKind=${_addressCharacterKind(returnedRune)}';
-}
-
-String _addressMismatchClassification(String submitted, String returned) {
-  String normalizeFormatting(String value) => value
-      .replaceAll(RegExp(r'[,.;:]+'), ' ')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
-
-  return normalizeFormatting(submitted) == normalizeFormatting(returned)
-      ? 'formatting_only_candidate'
-      : 'content_mismatch';
-}
-
 class _AddressChoice {
   final String key;
   final String name;
@@ -903,21 +857,40 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       _loading = true;
     });
 
+    final fullName = '$firstName $lastName';
+    final addressValue = _addressChanged
+        ? EditProfileScreen.buildStructuredAddressForSave(
+            unit: _unitController.text.trim(),
+            streetAddress: _addressController.text.trim(),
+            zipCode: _zipCode,
+            province: _province,
+            city: _city,
+            barangay: _barangay,
+          )
+        : _originalAddress;
+    final submittedProfile = <String, dynamic>{
+      ...widget.profile,
+      'first_name': firstName,
+      'middle_name': _middleNameController.text.trim(),
+      'last_name': lastName,
+      'name': fullName,
+      'contact_number': _contactController.text.trim(),
+      'contact': _contactController.text.trim(),
+      'address': addressValue,
+      ...structuredAddressFields,
+      'gender': _gender,
+      if (_dob != null)
+        'date_of_birth':
+            '${_dob!.year.toString().padLeft(4, '0')}-'
+            '${_dob!.month.toString().padLeft(2, '0')}-'
+            '${_dob!.day.toString().padLeft(2, '0')}',
+    };
+    var putConfirmed = false;
+
     try {
       final uri = Uri.parse(
         '$apiBaseUrl/api/patients/${Uri.encodeComponent(patientId)}',
       );
-      final fullName = '$firstName $lastName';
-      final addressValue = _addressChanged
-          ? EditProfileScreen.buildStructuredAddressForSave(
-              unit: _unitController.text.trim(),
-              streetAddress: _addressController.text.trim(),
-              zipCode: _zipCode,
-              province: _province,
-              city: _city,
-              barangay: _barangay,
-            )
-          : _originalAddress;
 
       final payload = <String, dynamic>{
         'first_name': firstName,
@@ -952,6 +925,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (!mounted) return;
 
       if (putSucceeded) {
+        putConfirmed = true;
         final profileResponse = await http
             .get(uri, headers: _jsonHeaders)
             .timeout(const Duration(seconds: 15));
@@ -962,7 +936,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         final returnedPatientId =
             profileData?['patient_id'] ?? profileData?['id'];
         final persistedAddress = profileData?['address']?.toString();
-        final addressMatches = persistedAddress == addressValue;
         final patientIdMatches =
             returnedPatientId == null ||
             returnedPatientId.toString().trim() == patientId;
@@ -974,56 +947,49 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         );
         final allStructuredAddressFieldsMatch = structuredAddressMatches.values
             .every((matches) => matches);
-        final addressDifferenceDetails = addressMatches
-            ? ''
-            : '${_addressDifferenceDiagnostic(addressValue, persistedAddress ?? '')}, ';
-        final addressMismatchClassification = addressMatches
-            ? 'none'
-            : _addressMismatchClassification(
-                addressValue,
-                persistedAddress ?? '',
-              );
         debugPrint(
           'EDIT PROFILE CONFIRMATION: status=${profileResponse.statusCode}, '
-          'addressPresent=${persistedAddress != null}, '
-          'addressLength=${persistedAddress?.length ?? 0}, '
-          'submittedAddressLength=${addressValue.length}, '
-          'addressMatches=$addressMatches, '
-          'addressMismatchClassification=$addressMismatchClassification, '
-          '$addressDifferenceDetails'
           'patientIdPresent=${returnedPatientId != null}, '
           'patientIdMatches=$patientIdMatches, '
           'topLevelKeys=${profileData?.keys.toList() ?? const []}, '
-          'structuredAddressFieldLengths=${structuredAddressFields.map((key, value) => MapEntry(key, value?.toString().length ?? -1))}, '
           'structuredAddressMatches=$structuredAddressMatches',
         );
         if (!mounted) return;
         if (profileResponse.statusCode < 200 ||
             profileResponse.statusCode >= 300 ||
             profileData == null ||
-            !addressMatches ||
-            !allStructuredAddressFieldsMatch ||
             !patientIdMatches) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                'The server did not confirm the updated address. Please try again.',
+                'Profile saved, but the updated profile could not be refreshed. Your submitted values are shown temporarily and are not server-confirmed.',
               ),
             ),
           );
+          Navigator.of(context).pop(submittedProfile);
+          return;
+        }
+
+        if (!allStructuredAddressFieldsMatch) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Profile saved, but the server returned different address details. Your submitted values are shown temporarily and are not server-confirmed.',
+              ),
+            ),
+          );
+          Navigator.of(context).pop(submittedProfile);
           return;
         }
 
         final verifiedProfile = profileData;
         Navigator.of(context).pop({
-          ...widget.profile,
+          ...submittedProfile,
           ...verifiedProfile,
           'patient_id': returnedPatientId ?? patientId,
-          'first_name': verifiedProfile['first_name'] ?? firstName,
-          'middle_name':
-              verifiedProfile['middle_name'] ??
-              _middleNameController.text.trim(),
-          'last_name': verifiedProfile['last_name'] ?? lastName,
+          'first_name': firstName,
+          'middle_name': _middleNameController.text.trim(),
+          'last_name': lastName,
           'name': verifiedProfile['name'] ?? fullName,
           'email': verifiedProfile['email'] ?? widget.profile['email'],
           'contact_number':
@@ -1034,7 +1000,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               verifiedProfile['contact'] ??
               verifiedProfile['contact_number'] ??
               _contactController.text.trim(),
-          'address': persistedAddress,
+          'address': persistedAddress ?? addressValue,
+          ...structuredAddressFields,
           'gender': verifiedProfile['gender'] ?? _gender,
           'date_of_birth':
               verifiedProfile['date_of_birth'] ??
@@ -1062,9 +1029,20 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     } catch (e) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (putConfirmed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Profile saved, but the updated profile could not be refreshed. Your submitted values are shown temporarily and are not server-confirmed.',
+            ),
+          ),
+        );
+        Navigator.of(context).pop(submittedProfile);
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     } finally {
       if (mounted) {
         setState(() {

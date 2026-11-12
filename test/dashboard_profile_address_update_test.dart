@@ -238,7 +238,7 @@ void main() {
       const patientId = 'synthetic-patient-id';
       const oldAddress =
           'Unit 205, 123 Main St, Zip Code: 4027, Province: Benguet, '
-          'City/Municipality: Baguio City, Barangay: Poblacion';
+          'City/Municipality: Baguio City, Barangay: Synthetic Old Barangay';
       const updatedStreet = '456 Synthetic Street';
       const updatedAddress =
           'Unit 205, 456 Synthetic Street, Zip Code: 4027, Province: Benguet, '
@@ -272,7 +272,7 @@ void main() {
                     'address': oldAddress,
                     'address_unit': 'Unit 205',
                     'address_street': '123 Main St',
-                    'address_barangay': 'Poblacion',
+                    'address_barangay': 'Synthetic Old Barangay',
                     'address_city_municipality': 'Baguio City',
                     'address_province': 'Benguet',
                     'address_zip_code': '4027',
@@ -307,6 +307,11 @@ void main() {
             );
             await tester.ensureVisible(streetField);
             await tester.enterText(streetField, updatedStreet);
+            final barangayField = find.byKey(
+              const ValueKey('edit-profile-barangay-manual'),
+            );
+            expect(barangayField, findsOneWidget);
+            await tester.enterText(barangayField, 'Poblacion');
             await tester.ensureVisible(find.text('Save'));
             await tester.tap(find.text('Save'));
             await tester.pump();
@@ -320,12 +325,12 @@ void main() {
               stateMatchLog,
               'PROFILE ADDRESS STATE: matchesConfirmedResponse=true',
             );
+            expect(putPayload?['address_barangay'], 'Poblacion');
             expect(stateMatchLog, isNot(contains(oldAddress)));
             expect(stateMatchLog, isNot(contains(updatedAddress)));
             final confirmationLog = diagnosticLogs.singleWhere(
               (message) => message.startsWith('EDIT PROFILE CONFIRMATION:'),
             );
-            expect(confirmationLog, contains('addressMatches=true'));
             expect(confirmationLog, contains('patientIdMatches=true'));
             expect(confirmationLog, contains('address_unit: true'));
             expect(confirmationLog, contains('address_street: true'));
@@ -354,7 +359,7 @@ void main() {
                   'address': oldAddress,
                   'address_unit': 'Unit 205',
                   'address_street': '123 Main St',
-                  'address_barangay': 'Poblacion',
+                  'address_barangay': 'Synthetic Old Barangay',
                   'address_city_municipality': 'Baguio City',
                   'address_province': 'Benguet',
                   'address_zip_code': '4027',

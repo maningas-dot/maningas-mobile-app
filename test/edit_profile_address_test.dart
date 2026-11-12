@@ -328,107 +328,96 @@ void main() {
     expect(requests.last.url, requests.first.url);
   });
 
-  testWidgets('diagnoses formatted GET address mismatch without logging it', (
-    tester,
-  ) async {
-    var returnedFromEdit = false;
-    var getRequested = false;
-    String? submittedAddress;
-    final diagnosticLogs = <String>[];
-    final previousDebugPrint = debugPrint;
-    debugPrint = (message, {wrapWidth}) {
-      if (message != null) diagnosticLogs.add(message);
-    };
+  testWidgets(
+    'accepts formatting-only address differences when structured fields match',
+    (tester) async {
+      Map<String, dynamic>? returnedProfile;
+      var getRequested = false;
+      String? submittedAddress;
+      final diagnosticLogs = <String>[];
+      final previousDebugPrint = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) diagnosticLogs.add(message);
+      };
 
-    try {
-      await http.runWithClient(
-        () async {
-          await _openEditProfile(
-            tester,
-            _ambiguousAddress,
-            onResult: (_) => returnedFromEdit = true,
-          );
-          await tester.enterText(_fieldFinder('Street Address'), '123 Main St');
-          await tester.enterText(
-            find.byKey(const ValueKey('edit-profile-unit')),
-            'Apt 12',
-          );
-          await tester.enterText(
-            find.byKey(const ValueKey('edit-profile-zip')),
-            '4028',
-          );
-          await tester.enterText(_manualFieldFinder('province'), 'Cavite');
-          await tester.enterText(_manualFieldFinder('city'), 'Imus');
-          await tester.enterText(_manualFieldFinder('barangay'), 'Anabu');
-          await tester.ensureVisible(find.text('Save'));
-          await tester.tap(find.text('Save'));
-          await tester.pump();
-          await tester.pumpAndSettle();
-        },
-        () => MockClient((request) async {
-          if (request.method == 'PUT') {
-            final payload = jsonDecode(request.body) as Map<String, dynamic>;
-            submittedAddress = payload['address'] as String;
-            return http.Response('{"success":true}', 200);
-          }
-          getRequested = true;
-          final formattedAddress = submittedAddress!.replaceFirst(
-            ', Zip Code:',
-            ' Zip Code:',
-          );
-          return http.Response(
-            jsonEncode({
-              'patient_id': 'test-patient',
-              'address': formattedAddress,
-              'address_unit': 'Apt 12',
-              'address_street': '123 Main St',
-              'address_barangay': 'Anabu',
-              'address_city_municipality': 'Imus',
-              'address_province': 'Cavite',
-              'address_zip_code': '4028',
-            }),
-            200,
-          );
-        }),
+      try {
+        await http.runWithClient(
+          () async {
+            await _openEditProfile(
+              tester,
+              _ambiguousAddress,
+              onResult: (profile) => returnedProfile = profile,
+            );
+            await tester.enterText(
+              _fieldFinder('Street Address'),
+              '123 Main St',
+            );
+            await tester.enterText(
+              find.byKey(const ValueKey('edit-profile-unit')),
+              'Apt 12',
+            );
+            await tester.enterText(
+              find.byKey(const ValueKey('edit-profile-zip')),
+              '4028',
+            );
+            await tester.enterText(_manualFieldFinder('province'), 'Cavite');
+            await tester.enterText(_manualFieldFinder('city'), 'Imus');
+            await tester.enterText(_manualFieldFinder('barangay'), 'Anabu');
+            await tester.ensureVisible(find.text('Save'));
+            await tester.tap(find.text('Save'));
+            await tester.pump();
+            await tester.pumpAndSettle();
+          },
+          () => MockClient((request) async {
+            if (request.method == 'PUT') {
+              final payload = jsonDecode(request.body) as Map<String, dynamic>;
+              submittedAddress = payload['address'] as String;
+              return http.Response('{"success":true}', 200);
+            }
+            getRequested = true;
+            final formattedAddress = submittedAddress!.replaceFirst(
+              ', Zip Code:',
+              ' Zip Code:',
+            );
+            return http.Response(
+              jsonEncode({
+                'patient_id': 'test-patient',
+                'address': formattedAddress,
+                'address_unit': 'Apt 12',
+                'address_street': '123 Main St',
+                'address_barangay': 'Anabu',
+                'address_city_municipality': 'Imus',
+                'address_province': 'Cavite',
+                'address_zip_code': '4028',
+              }),
+              200,
+            );
+          }),
+        );
+      } finally {
+        debugPrint = previousDebugPrint;
+      }
+
+      expect(getRequested, isTrue);
+      expect(returnedProfile, isNotNull);
+      expect(returnedProfile!['address_barangay'], 'Anabu');
+      expect(returnedProfile!['address'], isNot(submittedAddress));
+      expect(find.textContaining('Profile saved, but'), findsNothing);
+      final confirmationLog = diagnosticLogs.singleWhere(
+        (message) => message.startsWith('EDIT PROFILE CONFIRMATION:'),
       );
-    } finally {
-      debugPrint = previousDebugPrint;
-    }
+      expect(confirmationLog, contains('address_barangay: true'));
+      expect(confirmationLog, contains('address_city_municipality: true'));
+      expect(confirmationLog, contains('address_province: true'));
+      expect(confirmationLog, contains('address_zip_code: true'));
+      expect(confirmationLog, isNot(contains('addressMatches=')));
+    },
+  );
 
-    expect(getRequested, isTrue);
-    expect(returnedFromEdit, isFalse);
-    expect(find.text('Edit Profile'), findsOneWidget);
-    expect(
-      find.text(
-        'The server did not confirm the updated address. Please try again.',
-      ),
-      findsOneWidget,
-    );
-    final confirmationLog = diagnosticLogs.singleWhere(
-      (message) => message.startsWith('EDIT PROFILE CONFIRMATION:'),
-    );
-    expect(confirmationLog, contains('addressMatches=false'));
-    expect(
-      confirmationLog,
-      contains('addressMismatchClassification=formatting_only_candidate'),
-    );
-    expect(confirmationLog, contains('firstDiffIndex='));
-    expect(
-      confirmationLog,
-      contains('submittedCharKind=punctuation-or-symbol'),
-    );
-    expect(confirmationLog, contains('returnedCharKind=whitespace'));
-    expect(confirmationLog, contains('address_barangay: true'));
-    expect(confirmationLog, contains('address_city_municipality: true'));
-    expect(confirmationLog, contains('address_province: true'));
-    expect(confirmationLog, contains('address_zip_code: true'));
-    expect(confirmationLog, isNot(contains(submittedAddress!)));
-  });
-
-  testWidgets('classifies content mismatch and still rejects confirmation', (
+  testWidgets('detects structured address mismatches after a successful save', (
     tester,
   ) async {
-    var returnedFromEdit = false;
+    Map<String, dynamic>? returnedProfile;
     String? submittedAddress;
     final diagnosticLogs = <String>[];
     final previousDebugPrint = debugPrint;
@@ -442,7 +431,7 @@ void main() {
           await _openEditProfile(
             tester,
             _ambiguousAddress,
-            onResult: (_) => returnedFromEdit = true,
+            onResult: (profile) => returnedProfile = profile,
           );
           await tester.enterText(_fieldFinder('Street Address'), '123 Main St');
           await tester.enterText(
@@ -476,8 +465,8 @@ void main() {
               'patient_id': 'test-patient',
               'address': differentAddress,
               'address_unit': 'Apt 12',
-              'address_street': '123 Main St',
-              'address_barangay': 'Anabu',
+              'address_street': '456 Oak Ave',
+              'address_barangay': 'Different Barangay',
               'address_city_municipality': 'Imus',
               'address_province': 'Cavite',
               'address_zip_code': '4028',
@@ -490,37 +479,35 @@ void main() {
       debugPrint = previousDebugPrint;
     }
 
-    expect(returnedFromEdit, isFalse);
+    expect(returnedProfile, isNotNull);
+    expect(returnedProfile!['address_street'], '123 Main St');
+    expect(returnedProfile!['address_barangay'], 'Anabu');
     expect(
       find.text(
-        'The server did not confirm the updated address. Please try again.',
+        'Profile saved, but the server returned different address details. Your submitted values are shown temporarily and are not server-confirmed.',
       ),
       findsOneWidget,
     );
     final confirmationLog = diagnosticLogs.singleWhere(
       (message) => message.startsWith('EDIT PROFILE CONFIRMATION:'),
     );
-    expect(confirmationLog, contains('addressMatches=false'));
-    expect(
-      confirmationLog,
-      contains('addressMismatchClassification=content_mismatch'),
-    );
-    expect(confirmationLog, isNot(contains(submittedAddress!)));
-    expect(confirmationLog, isNot(contains('456 Oak Ave')));
+    expect(confirmationLog, contains('address_street: false'));
+    expect(confirmationLog, contains('address_barangay: false'));
+    expect(confirmationLog, isNot(contains('addressMatches=')));
     expect(confirmationLog, isNot(contains('test-patient')));
   });
 
-  testWidgets('does not confirm save when GET response omits address', (
+  testWidgets('returns submitted values after a failed follow-up GET', (
     tester,
   ) async {
-    var returnedFromEdit = false;
+    Map<String, dynamic>? returnedProfile;
 
     await http.runWithClient(
       () async {
         await _openEditProfile(
           tester,
           _ambiguousAddress,
-          onResult: (_) => returnedFromEdit = true,
+          onResult: (profile) => returnedProfile = profile,
         );
         await tester.enterText(_fieldFinder('Street Address'), '123 Main St');
         await tester.enterText(
@@ -543,32 +530,33 @@ void main() {
         if (request.method == 'PUT') {
           return http.Response('{"success":true}', 200);
         }
-        return http.Response('{"patient_id":"test-patient"}', 200);
+        return http.Response('{"error":"synthetic refresh failure"}', 503);
       }),
     );
 
-    expect(returnedFromEdit, isFalse);
+    expect(returnedProfile, isNotNull);
+    expect(returnedProfile!['address_barangay'], 'Anabu');
+    expect(returnedProfile!['address_street'], '123 Main St');
     expect(
       find.text(
-        'The server did not confirm the updated address. Please try again.',
+        'Profile saved, but the updated profile could not be refreshed. Your submitted values are shown temporarily and are not server-confirmed.',
       ),
       findsOneWidget,
     );
+    expect(find.textContaining('update failed'), findsNothing);
   });
 
-  testWidgets('does not confirm when a structured GET field mismatches', (
+  testWidgets('returns submitted values when follow-up GET throws', (
     tester,
   ) async {
-    var returnedFromEdit = false;
-    String? savedAddress;
-    Map<String, dynamic>? savedPayload;
+    Map<String, dynamic>? returnedProfile;
 
     await http.runWithClient(
       () async {
         await _openEditProfile(
           tester,
           _ambiguousAddress,
-          onResult: (_) => returnedFromEdit = true,
+          onResult: (profile) => returnedProfile = profile,
         );
         await tester.ensureVisible(find.text('Save'));
         await tester.tap(find.text('Save'));
@@ -577,39 +565,87 @@ void main() {
       },
       () => MockClient((request) async {
         if (request.method == 'PUT') {
-          savedPayload = jsonDecode(request.body) as Map<String, dynamic>;
-          savedAddress = savedPayload!['address'] as String;
           return http.Response('{"success":true}', 200);
         }
-        return http.Response(
-          jsonEncode({
-            'patient_id': 'test-patient',
-            'address': savedAddress,
-            for (final key in const [
-              'address_unit',
-              'address_street',
-              'address_barangay',
-              'address_city_municipality',
-              'address_province',
-              'address_zip_code',
-            ])
-              key: key == 'address_street'
-                  ? 'Different Street'
-                  : savedPayload![key],
-          }),
-          200,
-        );
+        throw http.ClientException('synthetic refresh failure');
       }),
     );
 
-    expect(returnedFromEdit, isFalse);
+    expect(returnedProfile, isNotNull);
+    expect(returnedProfile!['address_barangay'], 'Poblacion');
+    expect(returnedProfile!['address'], _ambiguousAddress);
     expect(
       find.text(
-        'The server did not confirm the updated address. Please try again.',
+        'Profile saved, but the updated profile could not be refreshed. Your submitted values are shown temporarily and are not server-confirmed.',
       ),
       findsOneWidget,
     );
+    expect(find.textContaining('Error:'), findsNothing);
   });
+
+  testWidgets(
+    'detects a structured GET mismatch and returns the submitted profile',
+    (tester) async {
+      Map<String, dynamic>? returnedProfile;
+      String? savedAddress;
+      Map<String, dynamic>? savedPayload;
+
+      await http.runWithClient(
+        () async {
+          await _openEditProfile(
+            tester,
+            _ambiguousAddress,
+            onResult: (profile) => returnedProfile = profile,
+          );
+          await tester.ensureVisible(find.text('Save'));
+          await tester.tap(find.text('Save'));
+          await tester.pump();
+          await tester.pumpAndSettle();
+        },
+        () => MockClient((request) async {
+          if (request.method == 'PUT') {
+            savedPayload = jsonDecode(request.body) as Map<String, dynamic>;
+            savedAddress = savedPayload!['address'] as String;
+            return http.Response('{"success":true}', 200);
+          }
+          return http.Response(
+            jsonEncode({
+              'patient_id': 'test-patient',
+              'address': savedAddress,
+              for (final key in const [
+                'address_unit',
+                'address_street',
+                'address_barangay',
+                'address_city_municipality',
+                'address_province',
+                'address_zip_code',
+              ])
+                key: key == 'address_street'
+                    ? 'Different Street'
+                    : savedPayload![key],
+            }),
+            200,
+          );
+        }),
+      );
+
+      expect(returnedProfile, isNotNull);
+      expect(
+        returnedProfile!['address_street'],
+        savedPayload!['address_street'],
+      );
+      expect(
+        find.text(
+          'Profile saved, but the server returned different address details. Your submitted values are shown temporarily and are not server-confirmed.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('The server did not confirm the updated address'),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets('allows unrelated edits when all structured fields are known', (
     tester,
