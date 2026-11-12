@@ -91,6 +91,14 @@ bool isValidGmailAddress(String? value) {
   ).hasMatch(localPart);
 }
 
+bool isValidRegistrationZipCode(String? value) =>
+    RegExp(r'^[0-9]{4}$').hasMatch((value ?? '').trim());
+
+Map<String, String> registrationAddressFields({
+  required String address,
+  required String zipCode,
+}) => {'address': address, 'address_zip_code': zipCode.trim()};
+
 enum RegistrationEmailVerificationState { verified, requiresOtp, unknown }
 
 RegistrationEmailVerificationState registrationEmailVerificationState(
@@ -905,9 +913,10 @@ class _AuthScreenState extends State<AuthScreen> {
           return;
         }
 
+        final zipCode = _zipCodeController.text.trim();
         final structuredAddress = buildStructuredAddress(
           streetAddress: _addressController.text.trim(),
-          zipCode: _zipCodeController.text.trim(),
+          zipCode: zipCode,
           province: _selectedProvince,
           city: _selectedCity,
           barangay: _selectedBarangay,
@@ -928,14 +937,15 @@ class _AuthScreenState extends State<AuthScreen> {
 
           'contact': normalizedContact,
 
-          'address': structuredAddress,
+          ...registrationAddressFields(
+            address: structuredAddress,
+            zipCode: zipCode,
+          ),
 
           'email': registrationEmail,
 
           'password': _passwordController.text,
         };
-
-        debugPrint('REGISTER REQUEST: $uri');
 
         final response = await http
             .post(uri, headers: jsonHeaders, body: jsonEncode(payload))
@@ -952,8 +962,6 @@ class _AuthScreenState extends State<AuthScreen> {
         } catch (_) {
           data = {};
         }
-
-        debugPrint('REGISTER STATUS: ${response.statusCode}');
 
         if (!mounted) return;
 
@@ -1490,6 +1498,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                         const SizedBox(height: 12),
                         TextFormField(
+                          key: const ValueKey('registration-zip-code'),
                           controller: _zipCodeController,
                           decoration: const InputDecoration(
                             labelText: 'Zip code *',
@@ -1498,6 +1507,9 @@ class _AuthScreenState extends State<AuthScreen> {
                           validator: (value) {
                             if (value == null || value.trim().isEmpty) {
                               return 'Enter zip code';
+                            }
+                            if (!isValidRegistrationZipCode(value)) {
+                              return 'ZIP code must be exactly 4 digits.';
                             }
                             return null;
                           },

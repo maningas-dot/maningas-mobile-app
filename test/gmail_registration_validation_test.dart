@@ -8,6 +8,41 @@ import 'package:optcare_app/main.dart';
 import 'package:optcare_app/services/patient_session_service.dart';
 
 void main() {
+  group('Registration ZIP code handling', () {
+    test('accepts four ASCII digits after trimming', () {
+      expect(isValidRegistrationZipCode('8013'), isTrue);
+      expect(isValidRegistrationZipCode(' 8013 '), isTrue);
+    });
+
+    test('rejects ZIP codes that are not exactly four ASCII digits', () {
+      for (final zipCode in [
+        '',
+        '   ',
+        '801',
+        '80135',
+        '80A3',
+        '８０１３',
+      ]) {
+        expect(
+          isValidRegistrationZipCode(zipCode),
+          isFalse,
+          reason: zipCode,
+        );
+      }
+    });
+
+    test('keeps the composite address and adds the trimmed ZIP field', () {
+      const address =
+          '123 Main St, Zip Code: 8013, Province: Davao Occidental, '
+          'City/Municipality: Sample City, Barangay: Sample Barangay';
+
+      expect(
+        registrationAddressFields(address: address, zipCode: ' 8013 '),
+        {'address': address, 'address_zip_code': '8013'},
+      );
+    });
+  });
+
   group('Gmail registration address validation', () {
     test('accepts lowercase, mixed-case, and surrounding whitespace', () {
       for (final email in [
@@ -131,6 +166,55 @@ void main() {
         find.textContaining('Only @gmail.com addresses are accepted.'),
         findsOneWidget,
       );
+      expect(requests, isEmpty);
+    }, () => client);
+
+    sessionService.close();
+  });
+
+  testWidgets('invalid ZIP prevents registration API request', (tester) async {
+    final requests = <http.Request>[];
+    final client = MockClient((request) async {
+      requests.add(request);
+      return http.Response('{}', 500);
+    });
+    final sessionService = PatientSessionService(
+      client: client,
+      tokenStorage: _MemoryTokenStorage(),
+      baseUrl: 'https://api.example.test',
+    );
+
+    await http.runWithClient(() async {
+      await tester.pumpWidget(
+        MaterialApp(home: AuthScreen(sessionService: sessionService)),
+      );
+      await tester.pumpAndSettle();
+
+      final registerMode = find.text('Create an account? Register');
+      await tester.ensureVisible(registerMode);
+      await tester.tap(registerMode);
+      await tester.pump();
+      final termsLink = find.text('Terms and Conditions').last;
+      await tester.ensureVisible(termsLink);
+      await tester.tap(termsLink);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(Checkbox).last);
+      await tester.pump();
+      await tester.tap(find.text('Continue'));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      final zipField = find.byKey(const ValueKey('registration-zip-code'));
+      await tester.ensureVisible(zipField);
+      await tester.enterText(zipField, '801');
+      final zipValidator = tester.widget<TextFormField>(zipField).validator!;
+      expect(zipValidator('801'), 'ZIP code must be exactly 4 digits.');
+
+      final submit = find.widgetWithText(ElevatedButton, 'Register');
+      await tester.ensureVisible(submit);
+      await tester.tap(submit);
+      await tester.pump();
+
+      expect(find.text('ZIP code must be exactly 4 digits.'), findsOneWidget);
       expect(requests, isEmpty);
     }, () => client);
 
