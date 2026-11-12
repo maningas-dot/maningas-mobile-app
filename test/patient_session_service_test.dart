@@ -50,10 +50,7 @@ void main() {
       Map<String, dynamic>? requestBody;
       final client = MockClient((request) async {
         requestBody = jsonDecode(request.body) as Map<String, dynamic>;
-        return http.Response(
-          jsonEncode({'token': 'memory-jwt', 'id': 2}),
-          200,
-        );
+        return http.Response(jsonEncode({'token': 'memory-jwt', 'id': 2}), 200);
       });
       final service = PatientSessionService(
         client: client,
@@ -94,16 +91,140 @@ void main() {
       client.close();
     });
 
-    test('preserves email verification response for the existing flow', () async {
-      final client = MockClient(
-        (_) async => http.Response(
-          jsonEncode({
-            'code': 'EMAIL_VERIFICATION_REQUIRED',
+    test(
+      'preserves email verification response for the existing flow',
+      () async {
+        final client = MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'code': 'EMAIL_VERIFICATION_REQUIRED',
+              'email': 'patient@example.test',
+            }),
+            403,
+          ),
+        );
+        final service = PatientSessionService(
+          client: client,
+          tokenStorage: _MemoryTokenStorage(),
+          baseUrl: 'https://api.example.test',
+        );
+
+        await expectLater(
+          service.login(
+            email: 'patient@example.test',
+            password: 'synthetic-password',
+            rememberMe: false,
+          ),
+          throwsA(
+            isA<PatientEmailVerificationRequired>().having(
+              (error) => error.email,
+              'email',
+              'patient@example.test',
+            ),
+          ),
+        );
+        client.close();
+      },
+    );
+  });
+
+  group('PatientSessionService current-password verification', () {
+    for (final (name, statusCode) in [
+      ('successful', 200),
+      ('unsuccessful', 401),
+    ]) {
+      test(
+        '$name verification preserves the active session and token storage',
+        () async {
+          final storage = _MemoryTokenStorage();
+          final requestBodies = <Map<String, dynamic>>[];
+          final requestPaths = <String>[];
+          final requestMethods = <String>[];
+          var requestCount = 0;
+          final client = MockClient((request) async {
+            requestCount++;
+            requestPaths.add(request.url.path);
+            requestMethods.add(request.method);
+            requestBodies.add(jsonDecode(request.body) as Map<String, dynamic>);
+            if (requestCount == 1) {
+              return http.Response(
+                jsonEncode({
+                  'token': 'active-session-token',
+                  'patient_id': 'patient-1',
+                }),
+                200,
+              );
+            }
+            return http.Response(
+              jsonEncode(
+                statusCode == 200
+                    ? {'token': 'verification-token', 'patient_id': 'patient-1'}
+                    : {'message': 'Current password is incorrect.'},
+              ),
+              statusCode,
+            );
+          });
+          final service = PatientSessionService(
+            client: client,
+            tokenStorage: storage,
+            baseUrl: 'https://api.example.test',
+          );
+
+          await service.login(
+            email: 'patient@example.test',
+            password: 'initial-password',
+            rememberMe: true,
+          );
+          final activeToken = service.token;
+          final storedToken = storage.value;
+          final writeCount = storage.writeCount;
+          final deleteCount = storage.deleteCount;
+
+          if (statusCode == 200) {
+            await service.verifyCurrentPassword(
+              email: ' Patient@Example.Test ',
+              password: '  exact current password  ',
+            );
+          } else {
+            await expectLater(
+              service.verifyCurrentPassword(
+                email: ' Patient@Example.Test ',
+                password: '  exact current password  ',
+              ),
+              throwsA(
+                isA<PatientLoginException>().having(
+                  (error) => error.message,
+                  'message',
+                  'Current password is incorrect.',
+                ),
+              ),
+            );
+          }
+
+          expect(requestMethods.last, 'POST');
+          expect(requestPaths.last, '/api/patients/login');
+          expect(requestBodies.last, {
             'email': 'patient@example.test',
-          }),
-          403,
-        ),
+            'password': '  exact current password  ',
+            'rememberMe': false,
+          });
+          expect(service.token, activeToken);
+          expect(storage.value, storedToken);
+          expect(storage.writeCount, writeCount);
+          expect(storage.deleteCount, deleteCount);
+          expect(activeToken, 'active-session-token');
+          expect(storedToken, 'active-session-token');
+          client.close();
+        },
       );
+    }
+
+    test('rejects missing credentials without sending a request', () async {
+      var requests = 0;
+      final client = MockClient((_) async {
+        requests++;
+        return http.Response('{}', 200);
+      });
       final service = PatientSessionService(
         client: client,
         tokenStorage: _MemoryTokenStorage(),
@@ -111,19 +232,13 @@ void main() {
       );
 
       await expectLater(
-        service.login(
+        service.verifyCurrentPassword(
           email: 'patient@example.test',
-          password: 'synthetic-password',
-          rememberMe: false,
+          password: '',
         ),
-        throwsA(
-          isA<PatientEmailVerificationRequired>().having(
-            (error) => error.email,
-            'email',
-            'patient@example.test',
-          ),
-        ),
+        throwsA(isA<PatientLoginException>()),
       );
+      expect(requests, 0);
       client.close();
     });
   });
@@ -194,42 +309,48 @@ void main() {
       client.close();
     });
 
-    test('preserves saved token and permits retry after network failure', () async {
-      final storage = _MemoryTokenStorage()..value = 'saved-jwt';
-      var requests = 0;
-      final client = MockClient((_) async {
-        requests++;
-        if (requests == 1) {
-          throw http.ClientException('offline');
-        }
-        return http.Response(
-          jsonEncode({'patient_id': 'patient-1'}),
-          200,
+    test(
+      'preserves saved token and permits retry after network failure',
+      () async {
+        final storage = _MemoryTokenStorage()..value = 'saved-jwt';
+        var requests = 0;
+        final client = MockClient((_) async {
+          requests++;
+          if (requests == 1) {
+            throw http.ClientException('offline');
+          }
+          return http.Response(jsonEncode({'patient_id': 'patient-1'}), 200);
+        });
+        final service = PatientSessionService(
+          client: client,
+          tokenStorage: storage,
+          baseUrl: 'https://api.example.test',
         );
-      });
-      final service = PatientSessionService(
-        client: client,
-        tokenStorage: storage,
-        baseUrl: 'https://api.example.test',
-      );
 
-      final firstResult = await service.restoreRememberedSession();
-      final retryResult = await service.restoreRememberedSession();
+        final firstResult = await service.restoreRememberedSession();
+        final retryResult = await service.restoreRememberedSession();
 
-      expect(firstResult.status, PatientSessionRestoreStatus.retryableFailure);
-      expect(storage.value, 'saved-jwt');
-      expect(retryResult.status, PatientSessionRestoreStatus.authenticated);
-      expect(requests, 2);
-      client.close();
-    });
+        expect(
+          firstResult.status,
+          PatientSessionRestoreStatus.retryableFailure,
+        );
+        expect(storage.value, 'saved-jwt');
+        expect(retryResult.status, PatientSessionRestoreStatus.authenticated);
+        expect(requests, 2);
+        client.close();
+      },
+    );
   });
 }
 
 class _MemoryTokenStorage implements PatientTokenStorage {
   String? value;
+  int writeCount = 0;
+  int deleteCount = 0;
 
   @override
   Future<void> deleteToken() async {
+    deleteCount++;
     value = null;
   }
 
@@ -238,6 +359,7 @@ class _MemoryTokenStorage implements PatientTokenStorage {
 
   @override
   Future<void> writeToken(String token) async {
+    writeCount++;
     value = token;
   }
 }

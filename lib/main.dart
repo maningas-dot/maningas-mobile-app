@@ -4593,6 +4593,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   MaterialPageRoute(
                     builder: (_) => SettingsScreen(
                       patientId: _profile['patient_id'],
+                      patientEmail: _profile['email']?.toString(),
                       sessionService: _sessionService,
                     ),
                   ),

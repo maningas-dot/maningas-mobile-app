@@ -165,6 +165,81 @@ class PatientSessionService {
     return PatientLoginResult(patient: patient, token: token);
   }
 
+  Future<void> verifyCurrentPassword({
+    required String email,
+    required String password,
+  }) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty || password.isEmpty) {
+      throw const PatientLoginException(
+        'Enter your registered email and current password.',
+      );
+    }
+
+    late final http.Response response;
+    try {
+      response = await _client
+          .post(
+            Uri.parse('$_baseUrl/api/patients/login'),
+            headers: const {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: jsonEncode({
+              'email': normalizedEmail,
+              'password': password,
+              'rememberMe': false,
+            }),
+          )
+          .timeout(timeout);
+    } on TimeoutException {
+      throw const PatientLoginException(
+        'The request timed out. Please try again.',
+      );
+    } on http.ClientException {
+      throw const PatientLoginException(
+        'Network error. Check your connection and try again.',
+      );
+    }
+
+    Map<String, dynamic>? data;
+    try {
+      data = _decodeObject(response.body);
+    } on FormatException {
+      data = null;
+    }
+
+    final patientData = _patientFromResponse(data);
+    if (data?['code']?.toString() == 'EMAIL_VERIFICATION_REQUIRED' ||
+        data?['requires_email_verification'] == true ||
+        data?['email_verified'] == false ||
+        patientData?['email_verified'] == false) {
+      throw PatientEmailVerificationRequired(normalizedEmail);
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final message =
+          data?['message']?.toString() ??
+          data?['error']?.toString() ??
+          'Current password is incorrect. Please try again.';
+      throw PatientLoginException(message);
+    }
+
+    final verifiedToken = data?['token']?.toString().trim();
+    if (data == null ||
+        data['success'] == false ||
+        verifiedToken == null ||
+        verifiedToken.isEmpty ||
+        patientData == null ||
+        _patientId(patientData).isEmpty) {
+      final message =
+          data?['message']?.toString() ??
+          data?['error']?.toString() ??
+          'The server returned an incomplete login response. Please try again.';
+      throw PatientLoginException(message);
+    }
+  }
+
   Future<PatientSessionRestoreResult> restoreRememberedSession() async {
     late final String? savedToken;
     try {

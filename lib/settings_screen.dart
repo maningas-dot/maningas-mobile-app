@@ -1,23 +1,31 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'app_settings.dart';
 import 'constants.dart';
+import 'services/password_recovery_service.dart';
 import 'services/patient_session_service.dart';
 import 'support_service_preview.dart' show SupportServiceScreen;
 import 'terms_and_conditions.dart';
-import 'verification_screen.dart';
+
+enum _PasswordChangeStep { currentPassword, otpAndNewPassword }
 
 class SettingsScreen extends StatefulWidget {
   final String patientId;
+  final String? patientEmail;
   final PatientSessionService? sessionService;
+  final PasswordRecoveryService? passwordRecoveryService;
 
   const SettingsScreen({
     super.key,
     required this.patientId,
+    this.patientEmail,
     this.sessionService,
+    this.passwordRecoveryService,
   });
 
   @override
@@ -25,8 +33,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  static const String _passwordChangeUnavailableMessage =
-      'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification. Please contact support or wait for backend support.';
+  static final _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
   bool _notificationsOn = true;
   bool _emailUpdatesOn = true;
@@ -40,11 +47,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _otpController = TextEditingController();
 
   bool _isLoading = true;
-  bool _otpLoading = false;
+  bool _passwordChangeLoading = false;
+  bool _ownsPasswordRecoveryService = false;
+  _PasswordChangeStep _passwordChangeStep = _PasswordChangeStep.currentPassword;
+  int _resendSecondsRemaining = 0;
+  Timer? _resendCountdownTimer;
+  late final PatientSessionService _sessionService =
+      widget.sessionService ?? patientSessionService;
+  late final PasswordRecoveryService _passwordRecoveryService;
 
   @override
   void initState() {
     super.initState();
+    _ownsPasswordRecoveryService = widget.passwordRecoveryService == null;
+    _passwordRecoveryService =
+        widget.passwordRecoveryService ?? ApiPasswordRecoveryService();
     _loadSettings();
   }
 
@@ -138,103 +155,181 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<bool> _requestPasswordChangeOtp(
-    String patientId,
-    String currentPassword,
-  ) async {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification.',
-          ),
-        ),
-      );
-    }
+  String get _patientEmail => (widget.patientEmail ?? '').trim().toLowerCase();
 
-    return false;
+  void _showPasswordChangeMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _openPasswordVerificationFlow(
-    String patientId,
-    String newPassword,
-  ) async {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification.',
-          ),
-        ),
-      );
-    }
+  void _startResendCooldown() {
+    _resendCountdownTimer?.cancel();
+    _resendSecondsRemaining = 60;
+    if (mounted) setState(() {});
+    _resendCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() => _resendSecondsRemaining--);
+      if (_resendSecondsRemaining == 0) timer.cancel();
+    });
   }
 
   Future<void> _savePassword() async {
-    final currentPassword = _currentPasswordController.text.trim();
+    if (_passwordChangeLoading) return;
+
+    if (_passwordChangeStep == _PasswordChangeStep.currentPassword) {
+      await _verifyCurrentPasswordAndRequestOtp();
+    } else {
+      await _submitPasswordReset();
+    }
+  }
+
+  Future<void> _verifyCurrentPasswordAndRequestOtp() async {
+    if (_currentPasswordController.text.isEmpty) {
+      _showPasswordChangeMessage('Enter your current password.');
+      return;
+    }
+    if (widget.patientId.trim().isEmpty) {
+      _showPasswordChangeMessage('Patient ID is missing. Please log in again.');
+      return;
+    }
+    if (!_emailPattern.hasMatch(_patientEmail)) {
+      _showPasswordChangeMessage(
+        'Your registered email is unavailable. Please sign in again or contact support.',
+      );
+      return;
+    }
+
+    setState(() => _passwordChangeLoading = true);
+    try {
+      await _sessionService.verifyCurrentPassword(
+        email: _patientEmail,
+        password: _currentPasswordController.text,
+      );
+      await _passwordRecoveryService.requestOtp(email: _patientEmail);
+      if (!mounted) return;
+      setState(() {
+        _passwordChangeStep = _PasswordChangeStep.otpAndNewPassword;
+        _otpController.clear();
+      });
+      _startResendCooldown();
+    } on PatientEmailVerificationRequired {
+      _showPasswordChangeMessage(
+        'Verify your registered email before changing your password.',
+      );
+    } on PatientLoginException catch (error) {
+      _showPasswordChangeMessage(error.message);
+    } on PasswordRecoveryException catch (error) {
+      _showPasswordChangeMessage(error.message);
+    } on Exception {
+      _showPasswordChangeMessage(
+        'Password change could not be started. Please try again.',
+      );
+    } finally {
+      if (mounted) setState(() => _passwordChangeLoading = false);
+    }
+  }
+
+  Future<void> _resendPasswordChangeOtp() async {
+    if (_passwordChangeLoading || _resendSecondsRemaining > 0) return;
+    if (!_emailPattern.hasMatch(_patientEmail)) {
+      _showPasswordChangeMessage(
+        'Your registered email is unavailable. Please sign in again or contact support.',
+      );
+      return;
+    }
+
+    setState(() => _passwordChangeLoading = true);
+    try {
+      await _passwordRecoveryService.requestOtp(email: _patientEmail);
+      if (!mounted) return;
+      _otpController.clear();
+      _startResendCooldown();
+      _showPasswordChangeMessage('A new verification code has been requested.');
+    } on PasswordRecoveryException catch (error) {
+      _showPasswordChangeMessage(error.message);
+    } on Exception {
+      _showPasswordChangeMessage(
+        'Could not request another verification code. Please try again.',
+      );
+    } finally {
+      if (mounted) setState(() => _passwordChangeLoading = false);
+    }
+  }
+
+  String? _validateNewPassword(String password) {
+    if (password.length < 8) return 'Password must be at least 8 characters.';
+    if (password.length > 128) {
+      return 'Password must not exceed 128 characters.';
+    }
+    if (RegExp(r'\s').hasMatch(password)) {
+      return 'Password must not contain spaces.';
+    }
+    if (!RegExp(r'[a-z]').hasMatch(password)) {
+      return 'Password must contain a lowercase letter.';
+    }
+    if (!RegExp(r'[A-Z]').hasMatch(password)) {
+      return 'Password must contain an uppercase letter.';
+    }
+    if (!RegExp(r'[0-9]').hasMatch(password)) {
+      return 'Password must contain a number.';
+    }
+    if (password == _currentPasswordController.text) {
+      return 'New password must be different from your current password.';
+    }
+    return null;
+  }
+
+  Future<void> _submitPasswordReset() async {
+    if (_passwordChangeLoading) return;
+    final otp = _otpController.text;
+    if (!RegExp(r'^[0-9]{6}$').hasMatch(otp)) {
+      _showPasswordChangeMessage('Enter the complete 6-digit code.');
+      return;
+    }
 
     final newPassword = _newPasswordController.text;
-
-    final confirmPassword = _confirmPasswordController.text;
-
-    if (currentPassword.isEmpty ||
-        newPassword.isEmpty ||
-        confirmPassword.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill all password fields.')),
-      );
+    final passwordError = _validateNewPassword(newPassword);
+    if (passwordError != null) {
+      _showPasswordChangeMessage(passwordError);
+      return;
+    }
+    if (_confirmPasswordController.text != newPassword) {
+      _showPasswordChangeMessage('New password and confirmation do not match.');
       return;
     }
 
-    if (newPassword.length < 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('New password must be at least 6 characters.'),
-        ),
+    setState(() => _passwordChangeLoading = true);
+    try {
+      await _passwordRecoveryService.resetPassword(
+        email: _patientEmail,
+        otp: otp,
+        newPassword: newPassword,
       );
-      return;
-    }
-
-    if (newPassword != confirmPassword) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('New password and confirmation do not match.'),
-        ),
+      if (!mounted) return;
+      _resendCountdownTimer?.cancel();
+      _currentPasswordController.clear();
+      _newPasswordController.clear();
+      _confirmPasswordController.clear();
+      _otpController.clear();
+      setState(() {
+        _passwordChangeStep = _PasswordChangeStep.currentPassword;
+        _resendSecondsRemaining = 0;
+      });
+      _showPasswordChangeMessage('Password changed successfully.');
+    } on PasswordRecoveryException catch (error) {
+      _showPasswordChangeMessage(error.message);
+    } on Exception {
+      _showPasswordChangeMessage(
+        'Could not change your password. Please try again.',
       );
-      return;
+    } finally {
+      if (mounted) setState(() => _passwordChangeLoading = false);
     }
-
-    if (currentPassword == newPassword) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'New password must be different from your current password.',
-          ),
-        ),
-      );
-      return;
-    }
-
-    if (widget.patientId.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Patient ID is missing. Please log in again.'),
-        ),
-      );
-      return;
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Change Password is temporarily unavailable because the backend does not currently support patient password-change OTP verification. Please contact support or wait for backend support.',
-          ),
-        ),
-      );
-    }
-
-    return;
   }
 
   void _openTermsAndConditions() {
@@ -254,6 +349,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    _resendCountdownTimer?.cancel();
+    if (_ownsPasswordRecoveryService) _passwordRecoveryService.close();
     _currentPasswordController.dispose();
     _newPasswordController.dispose();
     _confirmPasswordController.dispose();
@@ -352,99 +449,127 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                     const SizedBox(height: 6),
 
-                    const Text(
-                      'A verification code will be sent to your registered email before your password is changed.',
+                    Text(
+                      _passwordChangeStep == _PasswordChangeStep.currentPassword
+                          ? 'Verify your current password to request a code sent to your registered email.'
+                          : 'Enter the six-digit code sent to your registered email and choose a new password.',
                       style: TextStyle(color: Colors.black54),
                     ),
 
                     const SizedBox(height: 14),
 
-                    TextField(
-                      key: const ValueKey('currentPasswordField'),
-                      controller: _currentPasswordController,
-                      obscureText: !_currentPasswordVisible,
-                      enabled: !_otpLoading,
-                      decoration: InputDecoration(
-                        labelText: 'Current password',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          key: const ValueKey('currentPasswordToggle'),
-                          icon: Icon(
-                            _currentPasswordVisible
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                            color: const Color(0xFF0F76FF),
+                    if (_passwordChangeStep ==
+                        _PasswordChangeStep.currentPassword) ...[
+                      TextField(
+                        key: const ValueKey('currentPasswordField'),
+                        controller: _currentPasswordController,
+                        obscureText: !_currentPasswordVisible,
+                        enabled: !_passwordChangeLoading,
+                        decoration: InputDecoration(
+                          labelText: 'Current password',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            key: const ValueKey('currentPasswordToggle'),
+                            icon: Icon(
+                              _currentPasswordVisible
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                              color: const Color(0xFF0F76FF),
+                            ),
+                            onPressed: _passwordChangeLoading
+                                ? null
+                                : () => setState(
+                                    () => _currentPasswordVisible =
+                                        !_currentPasswordVisible,
+                                  ),
                           ),
-                          onPressed: _otpLoading
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _currentPasswordVisible =
-                                        !_currentPasswordVisible;
-                                  });
-                                },
                         ),
                       ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    TextField(
-                      key: const ValueKey('newPasswordField'),
-                      controller: _newPasswordController,
-                      obscureText: !_newPasswordVisible,
-                      enabled: !_otpLoading,
-                      decoration: InputDecoration(
-                        labelText: 'New password',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          key: const ValueKey('newPasswordToggle'),
-                          icon: Icon(
-                            _newPasswordVisible
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                            color: const Color(0xFF0F76FF),
-                          ),
-                          onPressed: _otpLoading
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _newPasswordVisible = !_newPasswordVisible;
-                                  });
-                                },
+                    ] else ...[
+                      TextField(
+                        key: const ValueKey('passwordChangeOtpField'),
+                        controller: _otpController,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(6),
+                        ],
+                        enabled: !_passwordChangeLoading,
+                        decoration: const InputDecoration(
+                          labelText: 'Six-digit verification code',
+                          border: OutlineInputBorder(),
                         ),
                       ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    TextField(
-                      key: const ValueKey('confirmPasswordField'),
-                      controller: _confirmPasswordController,
-                      obscureText: !_confirmPasswordVisible,
-                      enabled: !_otpLoading,
-                      decoration: InputDecoration(
-                        labelText: 'Confirm new password',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          key: const ValueKey('confirmPasswordToggle'),
-                          icon: Icon(
-                            _confirmPasswordVisible
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                            color: const Color(0xFF0F76FF),
+                      const SizedBox(height: 12),
+                      TextField(
+                        key: const ValueKey('newPasswordField'),
+                        controller: _newPasswordController,
+                        obscureText: !_newPasswordVisible,
+                        enabled: !_passwordChangeLoading,
+                        decoration: InputDecoration(
+                          labelText: 'New password',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            key: const ValueKey('newPasswordToggle'),
+                            icon: Icon(
+                              _newPasswordVisible
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                              color: const Color(0xFF0F76FF),
+                            ),
+                            onPressed: _passwordChangeLoading
+                                ? null
+                                : () => setState(
+                                    () => _newPasswordVisible =
+                                        !_newPasswordVisible,
+                                  ),
                           ),
-                          onPressed: _otpLoading
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _confirmPasswordVisible =
-                                        !_confirmPasswordVisible;
-                                  });
-                                },
                         ),
                       ),
-                    ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        key: const ValueKey('confirmPasswordField'),
+                        controller: _confirmPasswordController,
+                        obscureText: !_confirmPasswordVisible,
+                        enabled: !_passwordChangeLoading,
+                        decoration: InputDecoration(
+                          labelText: 'Confirm new password',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            key: const ValueKey('confirmPasswordToggle'),
+                            icon: Icon(
+                              _confirmPasswordVisible
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                              color: const Color(0xFF0F76FF),
+                            ),
+                            onPressed: _passwordChangeLoading
+                                ? null
+                                : () => setState(
+                                    () => _confirmPasswordVisible =
+                                        !_confirmPasswordVisible,
+                                  ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          key: const ValueKey('passwordChangeResend'),
+                          onPressed:
+                              !_passwordChangeLoading &&
+                                  _resendSecondsRemaining == 0
+                              ? _resendPasswordChangeOtp
+                              : null,
+                          child: Text(
+                            _resendSecondsRemaining > 0
+                                ? 'Resend code in ${_resendSecondsRemaining}s'
+                                : 'Resend code',
+                          ),
+                        ),
+                      ),
+                    ],
 
                     const SizedBox(height: 16),
 
@@ -453,7 +578,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       height: 48,
                       child: ElevatedButton(
                         key: const ValueKey('continuePasswordButton'),
-                        onPressed: _otpLoading ? null : _savePassword,
+                        onPressed: _passwordChangeLoading
+                            ? null
+                            : _savePassword,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF0F76FF),
                           foregroundColor: Colors.white,
@@ -462,7 +589,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        child: _otpLoading
+                        child: _passwordChangeLoading
                             ? const SizedBox(
                                 width: 22,
                                 height: 22,
@@ -471,7 +598,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   color: Colors.white,
                                 ),
                               )
-                            : const Text('Continue'),
+                            : Text(
+                                _passwordChangeStep ==
+                                        _PasswordChangeStep.currentPassword
+                                    ? 'Continue'
+                                    : 'Change Password',
+                              ),
                       ),
                     ),
                   ],

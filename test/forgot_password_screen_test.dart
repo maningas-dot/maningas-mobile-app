@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:optcare_app/forgot_password_screen.dart';
 import 'package:optcare_app/main.dart';
+import 'package:optcare_app/services/password_recovery_service.dart';
 
 void main() {
   group('ApiPasswordRecoveryService', () {
