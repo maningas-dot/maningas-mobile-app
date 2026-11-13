@@ -99,6 +99,22 @@ Map<String, String> registrationAddressFields({
   required String zipCode,
 }) => {'address': address, 'address_zip_code': zipCode.trim()};
 
+String buildRegistrationAddress({
+  required String houseUnit,
+  required String street,
+  required String zipCode,
+  required String province,
+  required String city,
+  required String barangay,
+}) => buildStructuredAddress(
+  unit: houseUnit.trim(),
+  streetAddress: street.trim(),
+  zipCode: zipCode.trim(),
+  province: province.trim(),
+  city: city.trim(),
+  barangay: barangay.trim(),
+);
+
 enum RegistrationEmailVerificationState { verified, requiresOtp, unknown }
 
 RegistrationEmailVerificationState registrationEmailVerificationState(
@@ -142,6 +158,33 @@ Map<String, dynamic> mergeProfileRefreshData(
   Map<String, dynamic> profileResponse,
 ) {
   return {...currentProfile, ...profileResponse};
+}
+
+Map<String, dynamic> profileNameFieldsFromRefresh(
+  Map<String, dynamic> currentProfile,
+  Map<String, dynamic> profileResponse,
+) {
+  final fields = <String, dynamic>{
+    for (final key in const ['first_name', 'middle_name', 'last_name'])
+      if (profileResponse.containsKey(key)) key: profileResponse[key],
+  };
+  final fullName = profileResponse['name']?.toString().trim() ?? '';
+  if (fullName.isEmpty) return fields;
+
+  final parts = fullName.split(RegExp(r'\s+'));
+  if (!profileResponse.containsKey('first_name')) {
+    fields['first_name'] = parts.first;
+  }
+  if (!profileResponse.containsKey('middle_name') &&
+      !currentProfile.containsKey('middle_name')) {
+    fields['middle_name'] = parts.length > 2
+        ? parts.sublist(1, parts.length - 1).join(' ')
+        : '';
+  }
+  if (!profileResponse.containsKey('last_name')) {
+    fields['last_name'] = parts.length > 1 ? parts.last : '';
+  }
+  return fields;
 }
 
 Map<String, dynamic> patientProfileFromResponse(dynamic response) {
@@ -523,7 +566,9 @@ class _AuthScreenState extends State<AuthScreen> {
 
   final _contactController = TextEditingController();
 
-  final _addressController = TextEditingController();
+  final _houseUnitController = TextEditingController();
+
+  final _streetController = TextEditingController();
 
   final _zipCodeController = TextEditingController();
 
@@ -914,8 +959,9 @@ class _AuthScreenState extends State<AuthScreen> {
         }
 
         final zipCode = _zipCodeController.text.trim();
-        final structuredAddress = buildStructuredAddress(
-          streetAddress: _addressController.text.trim(),
+        final structuredAddress = buildRegistrationAddress(
+          houseUnit: _houseUnitController.text,
+          street: _streetController.text,
           zipCode: zipCode,
           province: _selectedProvince,
           city: _selectedCity,
@@ -1048,7 +1094,8 @@ class _AuthScreenState extends State<AuthScreen> {
           _passwordController.clear();
           _confirmPasswordController.clear();
           _contactController.clear();
-          _addressController.clear();
+          _houseUnitController.clear();
+          _streetController.clear();
           _zipCodeController.clear();
           _ageController.clear();
 
@@ -1121,7 +1168,8 @@ class _AuthScreenState extends State<AuthScreen> {
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     _contactController.dispose();
-    _addressController.dispose();
+    _houseUnitController.dispose();
+    _streetController.dispose();
     _zipCodeController.dispose();
     _ageController.dispose();
 
@@ -1479,19 +1527,26 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                         const SizedBox(height: 12),
                         TextFormField(
-                          controller: _addressController,
+                          key: const ValueKey('registration-house-unit'),
+                          controller: _houseUnitController,
                           decoration: const InputDecoration(
-                            labelText: 'House no. / Street / Bldg / Landmark *',
-                            hintText:
-                                'Unit 205, 123 Main St., Bldg A, near market',
-                            alignLabelWithHint: true,
+                            labelText:
+                                'House / Unit / Lot / Block (if applicable)',
                           ),
                           keyboardType: TextInputType.streetAddress,
-                          textInputAction: TextInputAction.newline,
-                          maxLines: 2,
+                          textInputAction: TextInputAction.next,
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          key: const ValueKey('registration-street'),
+                          controller: _streetController,
+                          decoration: const InputDecoration(
+                            labelText: 'Street *',
+                          ),
+                          keyboardType: TextInputType.streetAddress,
                           validator: (value) {
                             if (value == null || value.trim().isEmpty) {
-                              return 'Enter house no./street/building/landmark';
+                              return 'Enter street address';
                             }
                             return null;
                           },
@@ -2080,66 +2135,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
         // =================================================
 
         setState(() {
+          final currentProfile = _profile;
           _profile = {
-            ...mergeProfileRefreshData(_profile, data),
+            ...mergeProfileRefreshData(currentProfile, data),
 
             // Map backend field names
             // to the names already used
             // by the Flutter UI.
-            'patient_id': data['patient_id'] ?? _profile['patient_id'],
+            'patient_id': data['patient_id'] ?? currentProfile['patient_id'],
 
-            'email': data['email'] ?? _profile['email'],
+            'email': data['email'] ?? currentProfile['email'],
 
             'contact_number':
                 data['contact'] ??
                 data['contact_number'] ??
-                _profile['contact_number'],
+                currentProfile['contact_number'],
 
-            'middle_name': data['middle_name'] ?? _profile['middle_name'],
+            'middle_name': data.containsKey('middle_name')
+                ? data['middle_name']
+                : currentProfile['middle_name'],
 
-            'gender': data['gender'] ?? _profile['gender'],
+            'gender': data['gender'] ?? currentProfile['gender'],
 
-            'age': data['age'] ?? _profile['age'],
+            'age': data['age'] ?? currentProfile['age'],
 
             'date_of_birth':
                 data['date_of_birth'] ??
                 data['dob'] ??
                 data['birth_date'] ??
-                _profile['date_of_birth'],
+                currentProfile['date_of_birth'],
 
-            'created_at': data['created_at'] ?? _profile['created_at'],
+            'created_at': data['created_at'] ?? currentProfile['created_at'],
 
-            'last_visit': data['last_visit'] ?? _profile['last_visit'],
+            'last_visit': data['last_visit'] ?? currentProfile['last_visit'],
           };
+          _profile.addAll(profileNameFieldsFromRefresh(currentProfile, data));
           _loadingProfile = false;
           _profileLoadError = null;
-
-          // =================================================
-          // SPLIT "name" INTO FIRST/LAST NAME
-          // =================================================
-
-          if (data['name'] != null) {
-            final fullName = data['name'].toString().trim();
-
-            if (fullName.isNotEmpty) {
-              final parts = fullName.split(RegExp(r'\s+'));
-
-              _profile['first_name'] = parts.first;
-
-              if (parts.length > 2) {
-                _profile['middle_name'] = parts
-                    .sublist(1, parts.length - 1)
-                    .join(' ');
-                _profile['last_name'] = parts.last;
-              } else if (parts.length > 1) {
-                _profile['middle_name'] = '';
-                _profile['last_name'] = parts.sublist(1).join(' ');
-              } else {
-                _profile['middle_name'] = '';
-                _profile['last_name'] = '';
-              }
-            }
-          }
         });
       } else {
         debugPrint('PROFILE REFRESH FAILED: status=${response.statusCode}');

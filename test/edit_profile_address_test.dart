@@ -91,6 +91,97 @@ void main() {
     expect(find.textContaining('ZIP Code updated'), findsNothing);
   });
 
+  testWidgets('sends trimmed middle name with a matching combined name', (
+    tester,
+  ) async {
+    Future<Map<String, dynamic>> saveMiddleName(
+      String enteredMiddleName, {
+      String initialMiddleName = '',
+    }) async {
+      Map<String, dynamic>? savedPayload;
+      Map<String, dynamic>? returnedProfile;
+
+      await http.runWithClient(
+        () async {
+          await _openEditProfile(
+            tester,
+            _ambiguousAddress,
+            profileData: {
+              'patient_id': 'test-patient',
+              'first_name': ' Test ',
+              'middle_name': initialMiddleName,
+              'last_name': ' Patient ',
+              'email': 'test@example.com',
+              'contact_number': '+639123456789',
+              'gender': 'Male',
+              'address': _ambiguousAddress,
+              'address_unit': 'Unit 205',
+              'address_street': '123 Main St',
+              'address_barangay': 'Poblacion',
+              'address_city_municipality': 'Baguio City',
+              'address_province': 'Benguet',
+              'address_zip_code': '4027',
+            },
+            onResult: (result) => returnedProfile = result,
+          );
+          await tester.enterText(
+            _fieldFinder('Middle name'),
+            enteredMiddleName,
+          );
+          await tester.ensureVisible(find.text('Save'));
+          await tester.tap(find.text('Save'));
+          await tester.pump();
+          await tester.pumpAndSettle();
+        },
+        () => MockClient((request) async {
+          if (request.method == 'PUT') {
+            savedPayload = jsonDecode(request.body) as Map<String, dynamic>;
+            return http.Response('{"success":true}', 200);
+          }
+          return http.Response(
+            jsonEncode({
+              'patient_id': 'test-patient',
+              'name': savedPayload!['name'],
+              'middle_name': savedPayload!['middle_name'],
+              'address': savedPayload!['address'],
+              for (final key in const [
+                'address_unit',
+                'address_street',
+                'address_barangay',
+                'address_city_municipality',
+                'address_province',
+                'address_zip_code',
+              ])
+                key: savedPayload![key],
+            }),
+            200,
+          );
+        }),
+      );
+
+      expect(savedPayload, isNotNull);
+      expect(returnedProfile, isNotNull);
+      expect(returnedProfile!['middle_name'], savedPayload!['middle_name']);
+      expect(returnedProfile!['name'], savedPayload!['name']);
+      return savedPayload!;
+    }
+
+    final added = await saveMiddleName('  Marie  ');
+    expect(added['middle_name'], 'Marie');
+    expect(added['name'], 'Test Marie Patient');
+
+    final removed = await saveMiddleName('', initialMiddleName: 'Marie');
+    expect(removed['middle_name'], '');
+    expect(removed['name'], 'Test Patient');
+
+    final whitespaceOnly = await saveMiddleName(
+      '   ',
+      initialMiddleName: 'Marie',
+    );
+    expect(whitespaceOnly['middle_name'], '');
+    expect(whitespaceOnly['name'], 'Test Patient');
+  });
+
   testWidgets('changing Province alone does not invent a ZIP Code', (
     tester,
   ) async {

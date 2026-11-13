@@ -31,17 +31,66 @@ void main() {
       }
     });
 
-    test('keeps the composite address and adds the trimmed ZIP field', () {
-      const address =
-          '123 Main St, Zip Code: 8013, Province: Davao Occidental, '
-          'City/Municipality: Sample City, Barangay: Sample Barangay';
+    test('formats split address components into the existing API fields', () {
+      final address = buildRegistrationAddress(
+        houseUnit: ' Unit 12 ',
+        street: ' Main Street ',
+        zipCode: ' 8013 ',
+        province: ' Davao Occidental ',
+        city: ' Sample City ',
+        barangay: ' Sample Barangay ',
+      );
 
       expect(
         registrationAddressFields(address: address, zipCode: ' 8013 '),
-        {'address': address, 'address_zip_code': '8013'},
+        {
+          'address':
+              'Unit 12, Main Street, Zip Code: 8013, '
+              'Province: Davao Occidental, City/Municipality: Sample City, '
+              'Barangay: Sample Barangay',
+          'address_zip_code': '8013',
+        },
       );
     });
   });
+
+  testWidgets(
+    'registration separates optional house/unit and required street',
+    (tester) async {
+      final sessionService = PatientSessionService(
+        client: MockClient((request) async => http.Response('{}', 500)),
+        tokenStorage: _MemoryTokenStorage(),
+        baseUrl: 'https://api.example.test',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(home: AuthScreen(sessionService: sessionService)),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Create an account? Register'));
+      await tester.tap(find.text('Create an account? Register'));
+      await tester.pump();
+
+      final houseUnitField = find.byKey(
+        const ValueKey('registration-house-unit'),
+      );
+      final streetField = find.byKey(const ValueKey('registration-street'));
+      expect(houseUnitField, findsOneWidget);
+      expect(streetField, findsOneWidget);
+
+      final houseUnitValidator = tester
+          .widget<TextFormField>(houseUnitField)
+          .validator;
+      final streetValidator = tester
+          .widget<TextFormField>(streetField)
+          .validator!;
+      expect(houseUnitValidator?.call(''), isNull);
+      expect(streetValidator('  '), 'Enter street address');
+      expect(streetValidator('Main Street'), isNull);
+
+      sessionService.close();
+    },
+  );
 
   group('Gmail registration address validation', () {
     test('accepts lowercase, mixed-case, and surrounding whitespace', () {

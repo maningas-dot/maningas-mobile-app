@@ -80,6 +80,49 @@ void main() {
     });
   });
 
+  group('profile name fields from refresh', () {
+    test('preserves explicit name fields over combined-name inference', () {
+      final result = profileNameFieldsFromRefresh(const {}, {
+        'name': 'Inferred First Inferred Middle Inferred Last',
+        'first_name': 'Explicit First',
+        'middle_name': 'Explicit Middle',
+        'last_name': 'Explicit Last',
+      });
+
+      expect(result, {
+        'first_name': 'Explicit First',
+        'middle_name': 'Explicit Middle',
+        'last_name': 'Explicit Last',
+      });
+    });
+
+    test('preserves an explicitly empty middle name', () {
+      final result = profileNameFieldsFromRefresh(const {}, {
+        'name': 'Synthetic First Inferred Middle Synthetic Last',
+        'middle_name': '',
+      });
+
+      expect(result['middle_name'], '');
+    });
+
+    test('derives middle name only when no separate value exists', () {
+      final result = profileNameFieldsFromRefresh(const {}, {
+        'name': 'SyntheticFirst SyntheticMiddle SyntheticLast',
+      });
+
+      expect(result['middle_name'], 'SyntheticMiddle');
+    });
+
+    test('does not infer over a middle name already in the profile', () {
+      final result = profileNameFieldsFromRefresh(
+        {'middle_name': 'Current Middle'},
+        {'name': 'Synthetic First Different Middle Synthetic Last'},
+      );
+
+      expect(result.containsKey('middle_name'), isFalse);
+    });
+  });
+
   test('profile GET null structured fields replace login values', () {
     const keys = [
       'address_unit',

@@ -857,7 +857,13 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       _loading = true;
     });
 
-    final fullName = '$firstName $lastName';
+    final middleName = _middleNameController.text.trim();
+    final fullNameParts = [
+      firstName,
+      if (middleName.isNotEmpty) middleName,
+      lastName,
+    ];
+    final submittedName = fullNameParts.join(' ');
     final addressValue = _addressChanged
         ? EditProfileScreen.buildStructuredAddressForSave(
             unit: _unitController.text.trim(),
@@ -871,9 +877,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final submittedProfile = <String, dynamic>{
       ...widget.profile,
       'first_name': firstName,
-      'middle_name': _middleNameController.text.trim(),
+      'middle_name': middleName,
       'last_name': lastName,
-      'name': fullName,
+      'name': submittedName,
       'contact_number': _contactController.text.trim(),
       'contact': _contactController.text.trim(),
       'address': addressValue,
@@ -894,9 +900,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
       final payload = <String, dynamic>{
         'first_name': firstName,
-        'middle_name': _middleNameController.text.trim(),
+        'middle_name': middleName,
         'last_name': lastName,
-        'name': fullName,
+        'name': submittedName,
         'contact_number': _contactController.text.trim(),
         'address': addressValue,
         ...structuredAddressFields,
@@ -988,9 +994,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           ...verifiedProfile,
           'patient_id': returnedPatientId ?? patientId,
           'first_name': firstName,
-          'middle_name': _middleNameController.text.trim(),
+          'middle_name': middleName,
           'last_name': lastName,
-          'name': verifiedProfile['name'] ?? fullName,
+          'name': verifiedProfile['name'] ?? submittedName,
           'email': verifiedProfile['email'] ?? widget.profile['email'],
           'contact_number':
               verifiedProfile['contact'] ??
