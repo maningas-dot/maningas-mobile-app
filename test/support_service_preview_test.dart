@@ -18,7 +18,11 @@ void main() {
       ),
       client: MockClient(
         (_) async => http.Response(
-          jsonEncode({'success': true, 'tickets': <Object>[]}),
+          jsonEncode({
+            'success': true,
+            'items': <Object>[],
+            'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+          }),
           200,
         ),
       ),

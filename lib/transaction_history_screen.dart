@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -5,14 +6,19 @@ import 'package:http/http.dart' as http;
 
 import 'constants.dart';
 import 'currency_format.dart';
+import 'services/patient_session_service.dart';
 
 class TransactionHistoryScreen extends StatefulWidget {
   final String? patientId;
+  final String? authenticatedPatientId;
+  final PatientSessionService? sessionService;
   final bool showScaffold;
 
   const TransactionHistoryScreen({
     super.key,
     this.patientId,
+    this.authenticatedPatientId,
+    this.sessionService,
     this.showScaffold = true,
   });
 
@@ -25,113 +31,451 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
   static const int _transactionsPerPage = 10;
 
   bool _loading = true;
+  bool _requestInFlight = false;
+  bool _refreshing = false;
   String? _errorMessage;
+  String? _refreshErrorMessage;
   List<_TransactionRecord> _records = [];
-  int _currentPageIndex = 0;
-
-  int get _pageCount => _records.isEmpty
-      ? 0
-      : (_records.length + _transactionsPerPage - 1) ~/ _transactionsPerPage;
+  int _currentPage = 1;
+  int _totalPages = 0;
+  int _lastRequestedPage = 1;
+  bool _recoveryAttempted = false;
 
   @override
   void initState() {
     super.initState();
-    _loadTransactions();
+    _loadPage(1);
   }
 
-  Future<void> _loadTransactions() async {
-    final patientId = (widget.patientId ?? '').trim();
+  String get _requestedPatientId => (widget.patientId ?? '').trim();
 
+  String get _authenticatedPatientId =>
+      (widget.authenticatedPatientId ?? widget.patientId ?? '').trim();
+
+  bool get _hasValidAuthenticatedIdentity {
+    final requested = _requestedPatientId;
+    final authenticated = _authenticatedPatientId;
+    return requested.isNotEmpty &&
+        authenticated.isNotEmpty &&
+        requested == authenticated;
+  }
+
+  Future<void> _refreshCurrentPage() {
+    if (_requestInFlight) return Future<void>.value();
+    return _loadPage(
+      _currentPage,
+      isRecovery: false,
+      isRefresh: true,
+    );
+  }
+
+  Future<void> _loadPage(
+    int page, {
+    bool isRecovery = false,
+    bool isRefresh = false,
+  }) async {
+    if (_requestInFlight) return;
+
+    final patientId = _requestedPatientId;
     if (patientId.isEmpty) {
       if (!mounted) return;
       setState(() {
         _loading = false;
         _errorMessage = 'Patient information is unavailable.';
+        _records = [];
+        _currentPage = 1;
+        _totalPages = 0;
       });
       return;
     }
 
-    setState(() {
-      _loading = true;
-      _errorMessage = null;
-    });
+    if (!_hasValidAuthenticatedIdentity) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _errorMessage =
+            'Unable to confirm your account for transaction history. Please sign in again.';
+        _records = [];
+        _currentPage = 1;
+        _totalPages = 0;
+      });
+      return;
+    }
+
+    final token = widget.sessionService?.token?.trim();
+    if (token == null || token.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _errorMessage = 'Please sign in to your patient account first.';
+        _records = [];
+        _currentPage = 1;
+        _totalPages = 0;
+      });
+      return;
+    }
+
+    final safePage = page < 1 ? 1 : page;
+
+    _requestInFlight = true;
+    _lastRequestedPage = safePage;
+    if (!isRecovery) {
+      _recoveryAttempted = false;
+    }
+
+    if (mounted) {
+      setState(() {
+        _refreshing = isRefresh;
+        if (isRefresh) {
+          _refreshErrorMessage = null;
+        } else {
+          _loading = true;
+          _errorMessage = null;
+        }
+      });
+    }
 
     try {
-      final uri = Uri.parse(
-        '$apiBaseUrl/api/patients/${Uri.encodeComponent(patientId)}/transactions',
-      );
+      final uri =
+          Uri.parse(
+            '$apiBaseUrl/api/patients/${Uri.encodeComponent(patientId)}/transactions',
+          ).replace(
+            queryParameters: {
+              'page': safePage.toString(),
+              'limit': _transactionsPerPage.toString(),
+            },
+          );
 
       final response = await http
-          .get(uri, headers: const {'Accept': 'application/json'})
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+          )
           .timeout(const Duration(seconds: 15));
 
       if (!mounted) return;
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        final decoded = jsonDecode(response.body);
-        final rawList = decoded is List
-            ? decoded
-            : decoded is Map
-            ? decoded['transactions'] ??
-                  decoded['data'] ??
-                  decoded['items'] ??
-                  []
-            : const [];
-        final list = rawList is List ? rawList : const <dynamic>[];
-        final indexedRecords = list
-            .whereType<Map<String, dynamic>>()
-            .map(_TransactionRecord.fromJson)
-            .toList()
-            .asMap()
-            .entries
-            .toList();
-
-        indexedRecords.sort((left, right) {
-          final leftDate = left.value.transactionDate;
-          final rightDate = right.value.transactionDate;
-
-          if (leftDate == null) {
-            return rightDate == null ? left.key.compareTo(right.key) : 1;
+        final handled = await _handleSuccessResponse(
+          response.body,
+          requestedPage: safePage,
+          isRefresh: isRefresh,
+        );
+        if (!handled) {
+          if (mounted) {
+            setState(() {
+              if (isRefresh) {
+                _refreshing = false;
+                _refreshErrorMessage =
+                    'Unable to refresh transactions. Your existing records are unchanged.';
+              } else {
+                _loading = false;
+                _errorMessage =
+                    'Unable to load transactions. Please try again later.';
+                _records = [];
+                _currentPage = 1;
+                _totalPages = 0;
+              }
+              _requestInFlight = false;
+            });
+          } else {
+            _requestInFlight = false;
           }
-          if (rightDate == null) return -1;
-
-          final dateComparison = rightDate.compareTo(leftDate);
-          return dateComparison != 0
-              ? dateComparison
-              : left.key.compareTo(right.key);
-        });
-
-        setState(() {
-          _records = indexedRecords.map((entry) => entry.value).toList();
-          if (_records.isEmpty) {
-            _currentPageIndex = 0;
-          } else if (_currentPageIndex >= _pageCount) {
-            _currentPageIndex = _pageCount - 1;
-          }
-          _loading = false;
-          _errorMessage = null;
-        });
+        }
         return;
       }
 
-      final decoded = jsonDecode(response.body);
-      final message = decoded is Map
-          ? (decoded['message']?.toString() ??
-                decoded['error']?.toString() ??
-                'Unable to load transactions.')
-          : 'Unable to load transactions.';
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        if (mounted) {
+          setState(() {
+            if (isRefresh) {
+              _refreshing = false;
+              _refreshErrorMessage =
+                  'Unable to refresh transactions. Your existing records are unchanged.';
+            } else {
+              _loading = false;
+              _errorMessage =
+                  'Your session is no longer valid. Please sign in again to view transactions.';
+              _records = [];
+              _currentPage = 1;
+              _totalPages = 0;
+            }
+            _requestInFlight = false;
+          });
+        } else {
+          _requestInFlight = false;
+        }
+        return;
+      }
 
-      setState(() {
-        _loading = false;
-        _errorMessage = message;
-      });
+      String message = 'Unable to load transactions.';
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map) {
+          message =
+              (decoded['message']?.toString() ??
+                      decoded['error']?.toString() ??
+                      message)
+                  .trim();
+          if (message.isEmpty) message = 'Unable to load transactions.';
+        }
+      } catch (_) {}
+
+      if (mounted) {
+        setState(() {
+          if (isRefresh) {
+            _refreshing = false;
+            _refreshErrorMessage =
+                'Unable to refresh transactions. Your existing records are unchanged.';
+          } else {
+            _loading = false;
+            _errorMessage = message;
+            _records = [];
+            _currentPage = 1;
+            _totalPages = 0;
+          }
+          _requestInFlight = false;
+        });
+      } else {
+        _requestInFlight = false;
+      }
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) {
+        _requestInFlight = false;
+        return;
+      }
       setState(() {
-        _loading = false;
-        _errorMessage = 'Unable to connect to the server.';
+        if (isRefresh) {
+          _refreshing = false;
+          _refreshErrorMessage =
+              'Unable to refresh transactions. Your existing records are unchanged.';
+        } else {
+          _loading = false;
+          _errorMessage = 'Unable to connect to the server.';
+          _records = [];
+          _currentPage = 1;
+          _totalPages = 0;
+        }
+        _requestInFlight = false;
       });
+    } finally {
+      if (_requestInFlight) {
+        if (mounted) {
+          setState(() {
+            _requestInFlight = false;
+          });
+        } else {
+          _requestInFlight = false;
+        }
+      }
     }
+  }
+
+  Future<bool> _handleSuccessResponse(
+    String body, {
+    required int requestedPage,
+    bool isRefresh = false,
+  }) async {
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(body);
+    } catch (_) {
+      return false;
+    }
+
+    if (decoded is! Map) return false;
+
+    final pagination = _parsePagination(decoded['pagination']);
+    final rawTransactions = decoded['transactions'];
+    final transactions = rawTransactions is List ? rawTransactions : null;
+
+    if (pagination == null || transactions == null) {
+      return false;
+    }
+
+    final page = pagination.page;
+    final totalPages = pagination.totalPages;
+    final total = pagination.total;
+    final records = transactions
+        .whereType<Map<String, dynamic>>()
+        .map(_TransactionRecord.fromJson)
+        .toList();
+
+    if (total == 0 || totalPages == 0) {
+      if (!mounted) {
+        _requestInFlight = false;
+        return true;
+      }
+      setState(() {
+        _records = [];
+        _currentPage = 1;
+        _totalPages = 0;
+
+        _loading = false;
+        _refreshing = false;
+        _errorMessage = null;
+        _refreshErrorMessage = null;
+        _requestInFlight = false;
+      });
+      return true;
+    }
+
+    final lastValidPage = totalPages < 1 ? 1 : totalPages;
+    final pageIsOutOfRange = page < 1 || page > lastValidPage;
+    final emptyPageWithRemaining = records.isEmpty && total > 0;
+
+    if ((pageIsOutOfRange || emptyPageWithRemaining) && requestedPage > 1) {
+      if (_recoveryAttempted) {
+        return false;
+      }
+      _recoveryAttempted = true;
+      _requestInFlight = false;
+      await _loadPage(
+        lastValidPage,
+        isRecovery: true,
+        isRefresh: isRefresh,
+      );
+      return true;
+    }
+
+    if (pageIsOutOfRange || (records.isEmpty && total > 0)) {
+      return false;
+    }
+
+    if (!mounted) {
+      _requestInFlight = false;
+      return true;
+    }
+    setState(() {
+      _records = records;
+      _currentPage = page;
+      _totalPages = lastValidPage;
+
+      _loading = false;
+      _refreshing = false;
+      _errorMessage = null;
+      _refreshErrorMessage = null;
+      _requestInFlight = false;
+    });
+    return true;
+  }
+
+  _TransactionPagination? _parsePagination(dynamic rawPagination) {
+    if (rawPagination is! Map) return null;
+
+    int? parseInt(dynamic value) {
+      if (value is int) return value;
+      if (value is num) return value.isFinite ? value.toInt() : null;
+      if (value is String) return int.tryParse(value.trim());
+      return null;
+    }
+
+    final page = parseInt(rawPagination['page']);
+    final limit = parseInt(rawPagination['limit']);
+    final total = parseInt(rawPagination['total']);
+    final totalPages = parseInt(rawPagination['totalPages']);
+
+    if (page == null ||
+        limit == null ||
+        total == null ||
+        totalPages == null ||
+        limit <= 0 ||
+        total < 0 ||
+        totalPages < 0) {
+      return null;
+    }
+
+    return _TransactionPagination(
+      page: page,
+      limit: limit,
+      total: total,
+      totalPages: totalPages,
+    );
+  }
+
+  void _retry() {
+    if (_requestInFlight) return;
+    final page = _lastRequestedPage < 1 ? 1 : _lastRequestedPage;
+    _loadPage(page);
+  }
+
+  Future<void> _showProofPreview(String proofUrl) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) {
+        return Dialog(
+          key: const ValueKey('transaction-proof-dialog'),
+          insetPadding: const EdgeInsets.all(24),
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: SizedBox(
+            width: 420,
+            child: SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: IconButton(
+                      key: const ValueKey('transaction-proof-close'),
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.network(
+                          proofUrl,
+                          key: const ValueKey('transaction-proof-preview'),
+                          fit: BoxFit.contain,
+                          loadingBuilder: (context, child, loadingProgress) {
+                            if (loadingProgress == null) return child;
+                            return const ColoredBox(
+                              color: Color(0xFFEAF2FF),
+                              child: Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            );
+                          },
+                          errorBuilder: (context, error, stackTrace) =>
+                              const ColoredBox(
+                                color: Color(0xFFEAF2FF),
+                                child: Center(
+                                  child: Text(
+                                    'ID picture unavailable',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.black54,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -147,6 +491,25 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         title: const Text('Transaction History'),
         backgroundColor: const Color(0xFF0F76FF),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            key: const ValueKey('transaction-refresh'),
+            tooltip: 'Refresh',
+            onPressed: _requestInFlight
+                ? null
+                : () => unawaited(_refreshCurrentPage()),
+            icon: _refreshing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.refresh),
+          ),
+        ],
       ),
       body: SafeArea(child: content),
     );
@@ -206,9 +569,56 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                     ],
                   ),
                 ),
+                if (!widget.showScaffold) ...[
+                  const SizedBox(width: 8),
+                  IconButton(
+                    key: const ValueKey('transaction-refresh'),
+                    tooltip: 'Refresh',
+                    onPressed: _requestInFlight
+                        ? null
+                        : () => unawaited(_refreshCurrentPage()),
+                    icon: _refreshing
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh),
+                  ),
+                ],
               ],
             ),
           ),
+          if (_refreshErrorMessage != null)
+            Container(
+              key: const ValueKey('transaction-refresh-error'),
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF4E5),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFD699)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.info_outline,
+                    size: 18,
+                    color: Color(0xFF9A6700),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _refreshErrorMessage!,
+                      style: const TextStyle(
+                        color: Color(0xFF7A5200),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -216,10 +626,20 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                 ? Center(
                     child: Padding(
                       padding: const EdgeInsets.all(24),
-                      child: Text(
-                        _errorMessage!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.black54),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _errorMessage!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.black54),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: _requestInFlight ? null : _retry,
+                            child: const Text('Retry'),
+                          ),
+                        ],
                       ),
                     ),
                   )
@@ -231,28 +651,23 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                     ),
                   )
                 : ListView.separated(
-                    key: ValueKey(_currentPageIndex),
+                    key: ValueKey(_currentPage),
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    itemCount: _currentPageRecords.length,
+                    itemCount: _records.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 12),
                     itemBuilder: (context, index) {
-                      return _buildTransactionCard(_currentPageRecords[index]);
+                      return _buildTransactionCard(_records[index]);
                     },
                   ),
           ),
-          if (!_loading && _errorMessage == null && _records.isNotEmpty)
+          if (!_loading &&
+              _errorMessage == null &&
+              _records.isNotEmpty &&
+              _totalPages > 0)
             _buildPaginationControls(),
         ],
       ),
     );
-  }
-
-  List<_TransactionRecord> get _currentPageRecords {
-    final startIndex = _currentPageIndex * _transactionsPerPage;
-    final endIndex = startIndex + _transactionsPerPage < _records.length
-        ? startIndex + _transactionsPerPage
-        : _records.length;
-    return _records.sublist(startIndex, endIndex);
   }
 
   Widget _buildPaginationControls() {
@@ -262,7 +677,7 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Page ${_currentPageIndex + 1} of $_pageCount',
+            'Page $_currentPage of $_totalPages',
             key: const ValueKey('transaction-page-indicator'),
             style: const TextStyle(
               color: Colors.black54,
@@ -281,8 +696,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                       minimumSize: const Size(0, 40),
                       padding: const EdgeInsets.symmetric(horizontal: 6),
                     ),
-                    onPressed: _currentPageIndex > 0
-                        ? () => setState(() => _currentPageIndex--)
+                    onPressed: (!_requestInFlight && _currentPage > 1)
+                        ? () => _loadPage(_currentPage - 1)
                         : null,
                     icon: const Icon(Icons.chevron_left),
                     label: const Text('Previous'),
@@ -298,8 +713,8 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                       minimumSize: const Size(0, 40),
                       padding: const EdgeInsets.symmetric(horizontal: 6),
                     ),
-                    onPressed: _currentPageIndex < _pageCount - 1
-                        ? () => setState(() => _currentPageIndex++)
+                    onPressed: (!_requestInFlight && _currentPage < _totalPages)
+                        ? () => _loadPage(_currentPage + 1)
                         : null,
                     icon: const Icon(Icons.chevron_right),
                     label: const Text('Next'),
@@ -341,8 +756,9 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  Icons.receipt_long_rounded,
+                  Icons.receipt_long,
                   color: record.statusColor,
+                  size: 22,
                 ),
               ),
               const SizedBox(width: 12),
@@ -353,11 +769,10 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                     Text(
                       record.title,
                       style: const TextStyle(
-                        fontSize: 16,
                         fontWeight: FontWeight.w700,
+                        fontSize: 14,
                       ),
                     ),
-                    const SizedBox(height: 4),
                     if (record.subtitle != null)
                       Text(
                         record.subtitle!,
@@ -429,6 +844,20 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                         ),
                       ),
                     ),
+                  if (record.paymentStatus != null &&
+                      record.paymentStatus != record.status &&
+                      record.status?.toLowerCase() != 'voided')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        record.paymentStatus!,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ],
@@ -453,12 +882,15 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 3),
                   child: Row(
                     children: [
+                      _TransactionItemThumbnail(imageUrl: item.imageUrl),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           item.label,
                           style: const TextStyle(fontSize: 12),
                         ),
                       ),
+                      const SizedBox(width: 8),
                       if (item.lineAmountLabel != null)
                         Text(
                           item.lineAmountLabel!,
@@ -478,9 +910,77 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
             const SizedBox(height: 8),
             if (record.subtotalLabel != null)
               _summaryRow('Subtotal', record.subtotalLabel!),
+            if (record.discountLabel != null &&
+                record.discountAmountLabel != null)
+              _summaryRow(
+                record.discountLabel!,
+                record.discountAmountLabel!,
+              ),
             if (record.vatLabel != null) _summaryRow('VAT', record.vatLabel!),
             if (record.totalAmountLabel != null)
               _summaryRow('Total', record.totalAmountLabel!, isTotal: true),
+          ],
+          if (record.proofUrl != null) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Divider(height: 1),
+            ),
+            const Text(
+              'SENIOR/PWD ID PROOF',
+              key: ValueKey('transaction-proof-section'),
+              style: TextStyle(
+                color: Colors.black54,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: InkWell(
+                key: const ValueKey('transaction-proof-thumbnail'),
+                onTap: () => _showProofPreview(record.proofUrl!),
+                borderRadius: BorderRadius.circular(12),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox(
+                    width: 96,
+                    height: 72,
+                    child: Image.network(
+                      record.proofUrl!,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const ColoredBox(
+                          color: Color(0xFFEAF2FF),
+                          child: Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        );
+                      },
+                      errorBuilder: (context, error, stackTrace) =>
+                          const ColoredBox(
+                            color: Color(0xFFEAF2FF),
+                            child: Center(
+                              child: Text(
+                                'ID picture unavailable',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Colors.black54,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
+                          ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ],
         ],
       ),
@@ -488,25 +988,85 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
   }
 }
 
+class _TransactionPagination {
+  final int page;
+  final int limit;
+  final int total;
+  final int totalPages;
+
+  const _TransactionPagination({
+    required this.page,
+    required this.limit,
+    required this.total,
+    required this.totalPages,
+  });
+}
+
+String? _validTransactionItemImageUrl(dynamic rawUrl) {
+  final value = rawUrl?.toString().trim();
+  if (value == null || value.isEmpty) return null;
+
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      (uri.scheme.toLowerCase() != 'http' &&
+          uri.scheme.toLowerCase() != 'https') ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty) {
+    return null;
+  }
+  return value;
+}
+
+bool _isValidSeniorPwdProofUrl(String? rawUrl) {
+  final value = rawUrl?.trim();
+  if (value == null || value.isEmpty) return false;
+
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      uri.scheme.toLowerCase() != 'https' ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
+    return false;
+  }
+
+  final host = uri.host.toLowerCase();
+  return host == 'cloudinary.com' || host.endsWith('.cloudinary.com');
+}
+
+String? _proofUrlFromJson(Map<String, dynamic> json) {
+  final primary = json['discount_id_proof_url']?.toString().trim();
+  if (_isValidSeniorPwdProofUrl(primary)) return primary;
+
+  final fallback = json['id_proof_url']?.toString().trim();
+  if (_isValidSeniorPwdProofUrl(fallback)) return fallback;
+  return null;
+}
+
 class _TransactionRecord {
   final String title;
   final String? subtitle;
   final String? referenceLabel;
+  final String? proofUrl;
   final DateTime? transactionDate;
   final String dateLabel;
   final String amountLabel;
   final String? totalAmountLabel;
   final String? subtotalLabel;
   final String? vatLabel;
+  final String? discountLabel;
+  final String? discountAmountLabel;
   final List<_TransactionItemRecord> items;
   final String? itemsSummary;
   final String? status;
+  final String? paymentStatus;
   final Color statusColor;
 
   bool get hasDetails =>
       items.isNotEmpty ||
       itemsSummary != null ||
       subtotalLabel != null ||
+      discountAmountLabel != null ||
       vatLabel != null ||
       totalAmountLabel != null;
 
@@ -514,28 +1074,43 @@ class _TransactionRecord {
     required this.title,
     required this.subtitle,
     required this.referenceLabel,
+    required this.proofUrl,
     required this.transactionDate,
     required this.dateLabel,
     required this.amountLabel,
     required this.totalAmountLabel,
     required this.subtotalLabel,
     required this.vatLabel,
+    required this.discountLabel,
+    required this.discountAmountLabel,
     required this.items,
     required this.itemsSummary,
     required this.status,
+    required this.paymentStatus,
     required this.statusColor,
   });
 
   factory _TransactionRecord.fromJson(Map<String, dynamic> json) {
+    final transactionStatus = json['transaction_status']?.toString().trim();
+    final genericStatus = json['status']?.toString().trim();
+    final paymentStatus = json['payment_status']?.toString().trim();
     final statusLabel = _firstNonEmpty([
-      json['status'],
-      json['payment_status'],
-      json['transaction_status'],
+      transactionStatus,
+      genericStatus,
+      paymentStatus,
     ]);
-    final normalized = statusLabel?.toLowerCase() ?? '';
-    final color = normalized == 'pending'
+    final normalized = statusLabel
+            ?.toLowerCase()
+            .replaceAll('_', ' ')
+            .replaceAll('-', ' ')
+            .trim() ??
+        '';
+    final color = normalized == 'pending' ||
+            normalized == 'pending void'
         ? Colors.orange
-        : normalized == 'failed' || normalized == 'cancelled'
+        : normalized == 'failed' ||
+              normalized == 'cancelled' ||
+              normalized == 'voided'
         ? Colors.red
         : const Color(0xFF0F76FF);
 
@@ -563,8 +1138,8 @@ class _TransactionRecord {
     ]);
 
     final rawAmount =
-        json['amount'] ??
         json['total_amount'] ??
+        json['amount'] ??
         json['payment_amount'] ??
         json['transaction_amount'] ??
         json['value'];
@@ -572,6 +1147,22 @@ class _TransactionRecord {
     final totalAmountLabel = _formatAmount(rawAmount);
     final subtotalLabel = _formatAmount(json['subtotal']);
     final vatLabel = _formatAmount(json['vat_amount']);
+    final discountAmount = _parsePositiveAmount(json['discount_amount']);
+    final discountName =
+        json['discount_name']?.toString().trim();
+    final discountPercent = _parsePositiveAmount(json['discount_percent']);
+    final discountLabel = discountAmount == null
+        ? null
+        : [
+            discountName == null || discountName.isEmpty
+                ? 'Discount'
+                : discountName,
+            if (discountPercent != null)
+              '(${_formatPercent(discountPercent)}%)',
+          ].join(' ');
+    final discountAmountLabel = discountAmount == null
+        ? null
+        : _formatAmount(-discountAmount);
     final rawItems = json['items'];
     final items = rawItems is List
         ? rawItems
@@ -580,6 +1171,7 @@ class _TransactionRecord {
               .toList()
         : <_TransactionItemRecord>[];
     final itemsSummary = _firstNonEmpty([json['items_summary']]);
+    final proofUrl = _proofUrlFromJson(json);
 
     final rawDate =
         json['created_at']?.toString() ??
@@ -596,17 +1188,39 @@ class _TransactionRecord {
       title: title,
       subtitle: subtitle,
       referenceLabel: reference == null ? null : 'Ref: $reference',
+      proofUrl: proofUrl,
       transactionDate: transactionDate,
       dateLabel: dateLabel,
       amountLabel: totalAmountLabel ?? 'Amount unavailable',
       totalAmountLabel: totalAmountLabel,
       subtotalLabel: subtotalLabel,
       vatLabel: vatLabel,
+      discountLabel: discountLabel,
+      discountAmountLabel: discountAmountLabel,
       items: items,
       itemsSummary: items.isEmpty ? itemsSummary : null,
       status: statusLabel == null ? null : _titleCase(statusLabel),
+      paymentStatus: paymentStatus == null ? null : _titleCase(paymentStatus),
       statusColor: color,
     );
+  }
+
+  static double? _parsePositiveAmount(dynamic rawValue) {
+    if (rawValue == null) return null;
+
+    final value = rawValue is num
+        ? rawValue.toDouble()
+        : double.tryParse(rawValue.toString().trim().replaceAll(',', ''));
+    if (value == null || !value.isFinite || value <= 0) return null;
+    return value;
+  }
+
+  static String _formatPercent(double value) {
+    if (value == value.roundToDouble()) return value.toStringAsFixed(0);
+    return value
+        .toStringAsFixed(2)
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '');
   }
 
   static String? _formatAmount(dynamic rawValue) {
@@ -681,13 +1295,78 @@ class _TransactionRecord {
   }
 }
 
+class _TransactionItemThumbnail extends StatelessWidget {
+  final String? imageUrl;
+
+  const _TransactionItemThumbnail({required this.imageUrl});
+
+  Widget _placeholder({Key? key}) {
+    return Container(
+      key: key,
+      width: 52,
+      height: 52,
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF2FF),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Icon(
+        Icons.image_not_supported_outlined,
+        size: 22,
+        color: Color(0xFF8091A8),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrl == null) {
+      return _placeholder(
+        key: const ValueKey('transaction-item-placeholder'),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: 52,
+        height: 52,
+        child: Image.network(
+          imageUrl!,
+          key: ValueKey('transaction-item-image:$imageUrl'),
+          fit: BoxFit.cover,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return Container(
+              width: 52,
+              height: 52,
+              color: const Color(0xFFEAF2FF),
+              child: const Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) => _placeholder(
+            key: const ValueKey('transaction-item-placeholder'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TransactionItemRecord {
   final String label;
   final String? lineAmountLabel;
+  final String? imageUrl;
 
   const _TransactionItemRecord({
     required this.label,
     required this.lineAmountLabel,
+    required this.imageUrl,
   });
 
   factory _TransactionItemRecord.fromJson(Map<String, dynamic> json) {
@@ -703,8 +1382,18 @@ class _TransactionItemRecord {
     final lineAmount = quantityValue != null && unitPrice != null
         ? _TransactionRecord._formatAmount(quantityValue * unitPrice)
         : null;
+    final primaryImageUrl = _validTransactionItemImageUrl(
+      json['image_url'],
+    );
+    final fallbackImageUrl = _validTransactionItemImageUrl(
+      json['image_2d_url'],
+    );
 
-    return _TransactionItemRecord(label: label, lineAmountLabel: lineAmount);
+    return _TransactionItemRecord(
+      label: label,
+      lineAmountLabel: lineAmount,
+      imageUrl: primaryImageUrl ?? fallbackImageUrl,
+    );
   }
 
   static String? _formatQuantity(dynamic value) {

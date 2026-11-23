@@ -12,7 +12,7 @@ import 'package:optcare_app/support_service_preview.dart';
 void main() {
   testWidgets('shows cancellation only for open tickets', (tester) async {
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse([
           _ticketJson('11', 'open'),
           _ticketJson('12', 'in_progress'),
@@ -46,7 +46,7 @@ void main() {
     'filters patient-cancelled tickets but preserves other ticket statuses',
     (tester) async {
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           return _ticketListResponse([
             _ticketJson('11', 'open'),
             _ticketJson('12', 'in_progress'),
@@ -104,7 +104,7 @@ void main() {
         var ticketListRequestCount = 0;
         final service = await _supportService((request) async {
           if (request.method == 'GET' &&
-              request.url.path.endsWith('/my-tickets')) {
+              request.url.path.contains('/my-tickets')) {
             ticketListRequestCount++;
             return _ticketListResponse([
               _ticketJson(
@@ -165,7 +165,7 @@ void main() {
     final requests = <http.Request>[];
     final service = await _supportService((request) async {
       requests.add(request);
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse([_ticketJson('11', 'open')]);
       }
       return http.Response('{}', 200);
@@ -190,7 +190,7 @@ void main() {
       isEmpty,
     );
     expect(
-      requests.where((request) => request.url.path.endsWith('/my-tickets')),
+      requests.where((request) => request.url.path.contains('/my-tickets')),
       hasLength(1),
     );
     expect(find.text('Open'), findsOneWidget);
@@ -203,7 +203,7 @@ void main() {
       var cancelled = false;
       final service = await _supportService((request) async {
         requests.add(request);
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           return _ticketListResponse([
             _ticketJson('11', cancelled ? 'cancelled' : 'open'),
             _ticketJson('12', 'open'),
@@ -281,7 +281,7 @@ void main() {
     var ticketListRequestCount = 0;
     final service = await _supportService((request) async {
       requests.add(request);
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         ticketListRequestCount++;
         return _ticketListResponse([
           _ticketJson(
@@ -311,7 +311,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      requests.where((request) => request.url.path.endsWith('/my-tickets')),
+      requests.where((request) => request.url.path.contains('/my-tickets')),
       hasLength(2),
     );
   });
@@ -322,7 +322,7 @@ void main() {
     final requests = <http.Request>[];
     final service = await _supportService((request) async {
       requests.add(request);
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse([_ticketJson('11', 'open')]);
       }
       if (request.url.path.endsWith('/tickets/11/cancel')) {
@@ -360,7 +360,7 @@ void main() {
     final cancellationResponse = Completer<http.Response>();
     var cancellationRequestCount = 0;
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse([_ticketJson('11', 'open')]);
       }
       if (request.url.path.endsWith('/tickets/11/cancel')) {
@@ -433,7 +433,19 @@ Future<SupportCenterService> _supportService(
 }
 
 http.Response _ticketListResponse(List<Map<String, Object?>> tickets) =>
-    http.Response(jsonEncode({'success': true, 'tickets': tickets}), 200);
+    http.Response(
+      jsonEncode({
+        'success': true,
+        'items': tickets,
+        'pagination': {
+          'page': 1,
+          'limit': 10,
+          'total': tickets.length,
+          'totalPages': tickets.isEmpty ? 0 : 1,
+        },
+      }),
+      200,
+    );
 
 Map<String, Object?> _ticketJson(
   String ticketId, [

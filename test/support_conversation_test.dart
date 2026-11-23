@@ -19,7 +19,7 @@ void main() {
       final service = await _supportService((request) async {
         requests.add(request);
         if (request.method == 'GET' &&
-            request.url.path.endsWith('/my-tickets')) {
+            request.url.path.contains('/my-tickets')) {
           return _ticketListResponse();
         }
         if (request.method == 'GET') {
@@ -99,7 +99,7 @@ void main() {
     tester,
   ) async {
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -150,7 +150,7 @@ void main() {
       ),
     ]) {
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           return _ticketListResponse();
         }
         if (request.method == 'GET') {
@@ -201,7 +201,7 @@ void main() {
       final refreshedTickets = Completer<http.Response>();
       var ticketListRequestCount = 0;
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           ticketListRequestCount++;
           if (ticketListRequestCount == 1) {
             return _ticketListResponse(status: 'open');
@@ -258,7 +258,7 @@ void main() {
     for (final status in ['in_progress', 'pending']) {
       var ticketListRequestCount = 0;
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           ticketListRequestCount++;
           return _ticketListResponse(
             status: ticketListRequestCount == 1 ? 'open' : status,
@@ -309,7 +309,7 @@ void main() {
   ) async {
     var ticketListRequestCount = 0;
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         ticketListRequestCount++;
         if (ticketListRequestCount == 1) {
           return _ticketListResponse(status: 'in_progress');
@@ -363,7 +363,7 @@ void main() {
     for (final status in ['closed', 'resolved', 'cancelled']) {
       var ticketListRequestCount = 0;
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           ticketListRequestCount++;
           return _ticketListResponse(
             status: ticketListRequestCount == 1 ? 'open' : status,
@@ -412,7 +412,7 @@ void main() {
 
   testWidgets('enforces the Website message length limit', (tester) async {
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -516,7 +516,7 @@ void main() {
     final requests = <http.Request>[];
     final service = await _supportService((request) async {
       requests.add(request);
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -779,7 +779,7 @@ void main() {
     var postCount = 0;
     final service = await _supportService((request) async {
       if (request.method == 'POST') postCount++;
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -814,7 +814,7 @@ void main() {
     final sendCompleter = Completer<http.Response>();
     var postCount = 0;
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -872,7 +872,7 @@ void main() {
     tester,
   ) async {
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -919,7 +919,7 @@ void main() {
     tester,
   ) async {
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {
@@ -966,7 +966,7 @@ void main() {
     (tester) async {
       var messageRequestCount = 0;
       final service = await _supportService((request) async {
-        if (request.url.path.endsWith('/my-tickets')) {
+        if (request.url.path.contains('/my-tickets')) {
           return _ticketListResponse();
         }
         if (request.method == 'GET') {
@@ -1007,7 +1007,7 @@ void main() {
   ) async {
     final messagesCompleter = Completer<http.Response>();
     final service = await _supportService((request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') return messagesCompleter.future;
@@ -1091,7 +1091,7 @@ http.Response _ticketListResponse({String status = 'in_progress'}) =>
     http.Response(
       jsonEncode({
         'success': true,
-        'tickets': [
+        'items': [
           {
             'ticket_id': 77,
             'patient_id': 'patient-7',
@@ -1102,6 +1102,7 @@ http.Response _ticketListResponse({String status = 'in_progress'}) =>
             'created_at': '2026-11-10T10:00:00Z',
           },
         ],
+        'pagination': {'page': 1, 'limit': 10, 'total': 1, 'totalPages': 1},
       }),
       200,
     );
@@ -1145,7 +1146,7 @@ XFile _validPng() => XFile.fromData(
 
 Future<http.Response> Function(http.Request) _conversationHandler() =>
     (request) async {
-      if (request.url.path.endsWith('/my-tickets')) {
+      if (request.url.path.contains('/my-tickets')) {
         return _ticketListResponse();
       }
       if (request.method == 'GET') {

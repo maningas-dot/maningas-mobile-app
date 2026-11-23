@@ -22,9 +22,15 @@ void main() {
           return http.Response(
             jsonEncode({
               'success': true,
-              'tickets': ticketListRequestCount == 1
+              'items': ticketListRequestCount == 1
                   ? <Object>[]
                   : [_ticketJson()],
+              'pagination': {
+                'page': 1,
+                'limit': 10,
+                'total': ticketListRequestCount == 1 ? 0 : 1,
+                'totalPages': ticketListRequestCount == 1 ? 0 : 1,
+              },
             }),
             200,
           );
@@ -39,7 +45,8 @@ void main() {
         MaterialApp(home: SupportServiceScreen(supportCenterService: service)),
       );
       await tester.pumpAndSettle();
-      await _openAndFillTicket(tester, priority: 'Urgent');
+      await _openAndFillTicket(tester);
+      expect(find.text('Priority'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('support-ticket-submit')));
       await tester.pumpAndSettle();
 
@@ -56,8 +63,8 @@ void main() {
         'category': 'Eyewear / Frames',
         'subject': 'New glasses question',
         'description': 'I need help choosing frames.',
-        'priority': 'Urgent',
       });
+      expect(jsonDecode(creationRequest.body), isNot(contains('priority')));
       expect(creationRequest.body, isNot(contains('patient_id')));
       expect(
         requests.where((request) => request.method == 'GET'),
@@ -134,7 +141,14 @@ void main() {
     final service = await _supportService((request) async {
       requests.add(request);
       if (request.method == 'POST') return responseCompleter.future;
-      return http.Response(jsonEncode({'success': true, 'tickets': []}), 200);
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+        }),
+        200,
+      );
     });
 
     await tester.pumpWidget(
@@ -233,7 +247,14 @@ void main() {
       if (ticketListRequestCount > 1) {
         throw http.ClientException('offline');
       }
-      return http.Response(jsonEncode({'success': true, 'tickets': []}), 200);
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+        }),
+        200,
+      );
     });
 
     await tester.pumpWidget(
@@ -250,20 +271,14 @@ void main() {
   });
 }
 
-Future<void> _openAndFillTicket(
-  WidgetTester tester, {
-  String priority = 'Medium',
-}) async {
+Future<void> _openAndFillTicket(WidgetTester tester) async {
   await tester.tap(find.text('New Ticket'));
   await tester.pumpAndSettle();
 
-  await _fillTicketForm(tester, priority: priority);
+  await _fillTicketForm(tester);
 }
 
-Future<void> _fillTicketForm(
-  WidgetTester tester, {
-  String priority = 'Medium',
-}) async {
+Future<void> _fillTicketForm(WidgetTester tester) async {
   await tester.enterText(
     find.byType(TextFormField).first,
     'New glasses question',
@@ -272,13 +287,6 @@ Future<void> _fillTicketForm(
   await tester.pumpAndSettle();
   await tester.tap(find.text('Eyewear / Frames').last);
   await tester.pumpAndSettle();
-
-  if (priority != 'Medium') {
-    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(priority).last);
-    await tester.pumpAndSettle();
-  }
 
   await tester.enterText(
     find.byType(TextFormField).last,

@@ -162,10 +162,16 @@ void main() {
         expect(request.headers['Authorization'], 'Bearer test-token');
         expect(request.headers['Accept'], 'application/json');
         return switch ('${request.method} ${request.url.path}') {
-          'GET /api/patients/support/my-tickets' => http.Response(
+          'GET /api/patients/support/my-tickets/page' => http.Response(
             jsonEncode({
               'success': true,
-              'tickets': [_ticketJson()],
+              'items': [_ticketJson()],
+              'pagination': {
+                'page': 1,
+                'limit': 10,
+                'total': 1,
+                'totalPages': 1,
+              },
             }),
             200,
           ),
@@ -212,15 +218,14 @@ void main() {
         category: 'General Inquiry',
         subject: 'New concern',
         description: 'Please help.',
-        priority: 'Medium',
       );
       expect(created.ticketId, '42');
       expect(jsonDecode(requests[2].body), {
         'category': 'General Inquiry',
         'subject': 'New concern',
         'description': 'Please help.',
-        'priority': 'Medium',
       });
+      expect(jsonDecode(requests[2].body), isNot(contains('priority')));
       expect(requests[2].body, isNot(contains('patient_id')));
 
       await service.cancelTicket('42');
@@ -237,7 +242,7 @@ void main() {
       expect(
         requests.map((request) => '${request.method} ${request.url.path}'),
         [
-          'GET /api/patients/support/my-tickets',
+          'GET /api/patients/support/my-tickets/page',
           'GET /api/patients/support/tickets/42/messages',
           'POST /api/patients/support/tickets',
           'PUT /api/patients/support/tickets/42/cancel',
@@ -245,6 +250,38 @@ void main() {
           'PUT /api/patients/support/tickets/42/messages/read',
         ],
       );
+    });
+
+    test('accepts the tickets alias in a paginated response', () async {
+      final session = await _authenticatedSession();
+      final service = _service(
+        session,
+        MockClient((request) async {
+          expect(request.url.path, '/api/patients/support/my-tickets/page');
+          expect(request.url.queryParameters['page'], '1');
+          expect(request.url.queryParameters['limit'], '10');
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'tickets': [_ticketJson()],
+              'pagination': {
+                'page': 1,
+                'limit': 10,
+                'total': 1,
+                'totalPages': 1,
+              },
+            }),
+            200,
+          );
+        }),
+      );
+
+      final page = await service.getMyTicketPage(page: 1, limit: 10);
+      expect(page.tickets.single.ticketId, '42');
+      expect(page.pagination.page, 1);
+      expect(page.pagination.limit, 10);
+      expect(page.pagination.total, 1);
+      expect(page.pagination.totalPages, 1);
     });
 
     test('sends image-only and text-plus-image multipart messages', () async {
@@ -358,7 +395,18 @@ void main() {
             requestCount++;
             return http.Response(
               jsonEncode(
-                requestCount == 1 ? [_ticketJson()] : [_messageJson()],
+                requestCount == 1
+                    ? {
+                        'success': true,
+                        'items': [_ticketJson()],
+                        'pagination': {
+                          'page': 1,
+                          'limit': 10,
+                          'total': 1,
+                          'totalPages': 1,
+                        },
+                      }
+                    : [_messageJson()],
               ),
               200,
             );
@@ -472,9 +520,15 @@ void main() {
           (_) async => http.Response(
             jsonEncode({
               'success': true,
-              'tickets': [
+              'items': [
                 {'subject': 'Missing ID'},
               ],
+              'pagination': {
+                'page': 1,
+                'limit': 10,
+                'total': 1,
+                'totalPages': 1,
+              },
             }),
             200,
           ),

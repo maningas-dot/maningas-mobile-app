@@ -5,8 +5,96 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'constants.dart';
+import 'services/patient_session_service.dart';
 
 const _clinicUtcOffset = Duration(hours: 8);
+
+class AppointmentServiceOption {
+  const AppointmentServiceOption({
+    required this.name,
+    required this.durationMinutes,
+    required this.legacyNames,
+  });
+
+  final String name;
+  final int durationMinutes;
+  final List<String> legacyNames;
+}
+
+class PartialClinicClosure {
+  const PartialClinicClosure({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
+}
+
+class AppointmentInterval {
+  const AppointmentInterval({required this.start, required this.end});
+
+  final TimeOfDay start;
+  final TimeOfDay end;
+}
+
+List<AppointmentServiceOption> parseAppointmentServices(dynamic data) {
+  if (data is! List) {
+    throw const FormatException('Invalid appointment service response.');
+  }
+
+  final services = <AppointmentServiceOption>[];
+  for (final item in data) {
+    if (item is! Map) {
+      throw const FormatException('Invalid appointment service record.');
+    }
+    final name = item['name']?.toString().trim() ?? '';
+    final duration = item['duration_minutes'];
+    final durationMinutes = duration is int
+        ? duration
+        : duration is String
+        ? int.tryParse(duration.trim())
+        : null;
+    if (name.isEmpty || durationMinutes == null || durationMinutes <= 0) {
+      throw const FormatException('Invalid appointment service record.');
+    }
+
+    final rawLegacyNames = item['legacy_names'];
+    if (rawLegacyNames != null && rawLegacyNames is! List) {
+      throw const FormatException('Invalid appointment service legacy names.');
+    }
+    final legacyNames = rawLegacyNames is List
+        ? rawLegacyNames
+              .whereType<Object>()
+              .map((value) => value.toString().trim())
+              .where((value) => value.isNotEmpty)
+              .toList(growable: false)
+        : const <String>[];
+    services.add(
+      AppointmentServiceOption(
+        name: name,
+        durationMinutes: durationMinutes,
+        legacyNames: legacyNames,
+      ),
+    );
+  }
+  return services;
+}
+
+TimeOfDay? parseClinicClosureTime(dynamic rawValue) {
+  final raw = rawValue?.toString().trim() ?? '';
+  if (raw.isEmpty) return null;
+  final match = RegExp(r'^(\d{1,2}):(\d{2})(?::\d{2})?$').firstMatch(raw);
+  if (match == null) return null;
+  final hour = int.tryParse(match.group(1)!);
+  final minute = int.tryParse(match.group(2)!);
+  if (hour == null ||
+      minute == null ||
+      hour < 0 ||
+      hour > 23 ||
+      minute < 0 ||
+      minute > 59) {
+    return null;
+  }
+  return TimeOfDay(hour: hour, minute: minute);
+}
 
 DateTime appointmentClinicLocalNow({DateTime? now, DateTime? utcNow}) {
   final clinicTime =
@@ -39,6 +127,7 @@ bool isAppointmentStatusBlocking(dynamic status) {
     'canceled',
     'rejected',
     'declined',
+    'completed',
   }.contains(normalized);
 }
 
@@ -129,6 +218,27 @@ bool isAppointmentSlotAvailable(
       isDateSelectableForBooking(date, closedDates, now: now) &&
       !isAppointmentSlotWithinBookingCutoff(date, time, now: now) &&
       !bookedSlots.contains(appointmentSlotKey(date, time));
+}
+
+int _timeOfDayMinutes(TimeOfDay time) => time.hour * 60 + time.minute;
+
+bool appointmentIntervalOverlaps({
+  required TimeOfDay slotStart,
+  required int slotDurationMinutes,
+  required TimeOfDay intervalStart,
+  required int intervalDurationMinutes,
+}) {
+  final slotStartMinutes = _timeOfDayMinutes(slotStart);
+  final slotEndMinutes = slotStartMinutes + slotDurationMinutes;
+  final intervalStartMinutes = _timeOfDayMinutes(intervalStart);
+  final intervalEndMinutes = intervalStartMinutes + intervalDurationMinutes;
+  return slotStartMinutes < intervalEndMinutes &&
+      slotEndMinutes >= intervalStartMinutes;
+}
+
+bool appointmentSlotFitsClinicHours(TimeOfDay start, int durationMinutes) {
+  final endMinutes = _timeOfDayMinutes(start) + durationMinutes;
+  return endMinutes <= 18 * 60;
 }
 
 bool isClinicOpenDay(DateTime date) {
@@ -231,6 +341,9 @@ Set<DateTime> parseClinicClosureDates(dynamic data) {
     }
 
     if (item.containsKey('start_date') || item.containsKey('end_date')) {
+      if (item['start_time'] != null && item['end_time'] != null) {
+        continue;
+      }
       final startDate = _parseClinicClosureDateOnly(
         item['start_date']?.toString() ?? '',
       );
@@ -296,6 +409,31 @@ Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
 
     final record = item as Map;
     if (record.containsKey('start_date') || record.containsKey('end_date')) {
+      if (record['start_time'] != null && record['end_time'] != null) {
+        final startDate = _parseClinicClosureDateOnly(
+          record['start_date']?.toString() ?? '',
+        );
+        final endDate = _parseClinicClosureDateOnly(
+          record['end_date']?.toString() ?? '',
+        );
+        if (startDate != null && endDate != null) {
+          final rawReason =
+              record['reason'] ??
+              record['closure_reason'] ??
+              record['description'];
+          final reason = rawReason is String && rawReason.trim().isNotEmpty
+              ? rawReason.trim()
+              : 'No reason provided.';
+          for (
+            var date = startDate;
+            !date.isAfter(endDate);
+            date = date.add(const Duration(days: 1))
+          ) {
+            reasonsByDate.putIfAbsent(date, () => <String>{}).add(reason);
+          }
+        }
+        continue;
+      }
       final startDate = _parseClinicClosureDateOnly(
         record['start_date']?.toString() ?? '',
       )!;
@@ -310,7 +448,10 @@ Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
       ) {
         dates.add(date);
       }
-      addReason(dates, record['reason']);
+      addReason(
+        dates,
+        record['reason'] ?? record['closure_reason'] ?? record['description'],
+      );
       continue;
     }
 
@@ -329,7 +470,9 @@ Map<DateTime, Set<String>> parseClinicClosureReasons(dynamic data) {
     final date = _parseClinicClosureDate(
       dateKey.isEmpty ? '' : record[dateKey]?.toString() ?? '',
     )!;
-    addReason([date], record['reason']);
+    addReason([
+      date,
+    ], record['reason'] ?? record['closure_reason'] ?? record['description']);
   }
 
   return reasonsByDate;
@@ -365,6 +508,52 @@ DateTime? _parseClinicClosureDateOnly(String rawDate) {
   final normalizedRaw = rawDate.trim();
   if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(normalizedRaw)) return null;
   return _parseClinicClosureDate(normalizedRaw);
+}
+
+Map<DateTime, List<PartialClinicClosure>> parsePartialClinicClosures(
+  dynamic data,
+) {
+  if (data is! List) {
+    throw const FormatException('Invalid clinic closure response.');
+  }
+
+  final result = <DateTime, List<PartialClinicClosure>>{};
+  for (final item in data) {
+    if (item is! Map) continue;
+    final startDate = _parseClinicClosureDateOnly(
+      item['start_date']?.toString() ?? '',
+    );
+    final endDate = _parseClinicClosureDateOnly(
+      item['end_date']?.toString() ?? '',
+    );
+    final rawStartTime = item['start_time'];
+    final rawEndTime = item['end_time'];
+    if (startDate == null ||
+        endDate == null ||
+        rawStartTime == null ||
+        rawEndTime == null) {
+      continue;
+    }
+
+    final startTime = parseClinicClosureTime(rawStartTime);
+    final endTime = parseClinicClosureTime(rawEndTime);
+    if (startTime == null ||
+        endTime == null ||
+        _timeOfDayMinutes(endTime) <= _timeOfDayMinutes(startTime)) {
+      continue;
+    }
+
+    for (
+      var date = startDate;
+      !date.isAfter(endDate);
+      date = date.add(const Duration(days: 1))
+    ) {
+      result
+          .putIfAbsent(date, () => [])
+          .add(PartialClinicClosure(start: startTime, end: endTime));
+    }
+  }
+  return result;
 }
 
 String clinicClosureResponseShape(dynamic data) {
@@ -454,6 +643,8 @@ String _safeFieldName(Object? key) {
 
 class AppointmentSchedulerScreen extends StatefulWidget {
   final dynamic patientId;
+  final String? authenticatedPatientId;
+  final PatientSessionService? sessionService;
   final Future<void> Function() onScheduled;
   final http.Client? client;
   final DateTime Function()? nowProvider;
@@ -461,6 +652,8 @@ class AppointmentSchedulerScreen extends StatefulWidget {
   const AppointmentSchedulerScreen({
     super.key,
     required this.patientId,
+    this.authenticatedPatientId,
+    this.sessionService,
     required this.onScheduled,
     this.client,
     this.nowProvider,
@@ -474,6 +667,7 @@ class AppointmentSchedulerScreen extends StatefulWidget {
 class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
     with WidgetsBindingObserver {
   late final http.Client _client = widget.client ?? http.Client();
+  late final PatientSessionService? _sessionService = widget.sessionService;
   late final bool _ownsClient = widget.client == null;
   late DateTime _selectedDate;
   late DateTime _visibleMonth;
@@ -481,19 +675,45 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
   TimeOfDay? _selectedTime;
 
   String? _selectedVisitType;
+  List<AppointmentServiceOption> _serviceOptions = const [];
+  bool _loadingServices = true;
+  String? _serviceLoadError;
 
-  final List<String> _visitTypeOptions = [
-    'Eye Examination',
-    'Follow Up',
-    'Frame / Eyewear',
-    'Contact Lens',
-  ];
+  AppointmentServiceOption? get _selectedService {
+    final selected = (_selectedVisitType ?? '').trim();
+    if (selected.isEmpty) return null;
+    for (final service in _serviceOptions) {
+      if (service.name == selected) return service;
+      if (service.legacyNames.any(
+        (legacyName) => legacyName.toLowerCase() == selected.toLowerCase(),
+      )) {
+        return service;
+      }
+    }
+    return null;
+  }
 
-  bool _creatingAppointment = false;
+  int? _durationForAppointmentPurpose(String purpose) {
+    final normalized = purpose.trim().toLowerCase();
+    if (normalized.isEmpty) return null;
+    for (final service in _serviceOptions) {
+      if (service.name.toLowerCase() == normalized) {
+        return service.durationMinutes;
+      }
+      if (service.legacyNames.any(
+        (legacyName) => legacyName.toLowerCase() == normalized,
+      )) {
+        return service.durationMinutes;
+      }
+    }
+    return null;
+  }
+
   bool _loadingAvailability = false;
   bool _refreshingAvailability = false;
   bool _availabilityVerified = false;
-  Completer<void>? _availabilityLoadCompleter;
+  bool _isSubmitting = false;
+  bool _availabilityRequestInFlight = false;
   int _calendarAvailabilityRevision = 0;
 
   String? _availabilityError;
@@ -525,6 +745,10 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
 
   final Set<DateTime> _closedDates = {};
   Map<DateTime, Set<String>> _closureReasonsByDate = {};
+  Map<DateTime, List<PartialClinicClosure>> _partialClosuresByDate = {};
+  Map<DateTime, List<AppointmentInterval>> _appointmentIntervalsByDate = {};
+  int _serviceRequestGeneration = 0;
+  int _availabilityRequestGeneration = 0;
 
   /*
   ============================================================
@@ -538,14 +762,16 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
         '${date.day.toString().padLeft(2, '0')}';
   }
 
-  String _timeKey(TimeOfDay time) {
-    return '${time.hour.toString().padLeft(2, '0')}:'
-        '${time.minute.toString().padLeft(2, '0')}';
+  String _formatEndTime(TimeOfDay start, int durationMinutes) {
+    final totalMinutes = start.hour * 60 + start.minute + durationMinutes;
+    final hour = (totalMinutes ~/ 60) % 24;
+    final minute = totalMinutes % 60;
+    final period = hour >= 12 ? 'PM' : 'AM';
+    final displayHour = hour % 12 == 0 ? 12 : hour % 12;
+    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
-  String _toMysqlTime(TimeOfDay time) {
-    return '${_timeKey(time)}:00';
-  }
+  String _formatTime(TimeOfDay time) => time.format(context);
 
   DateTime _now() => appointmentClinicLocalNow(now: widget.nowProvider?.call());
 
@@ -566,14 +792,6 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
   ============================================================
   */
 
-  bool _isPastTime(TimeOfDay time) {
-    return isAppointmentSlotWithinBookingCutoff(
-      _selectedDate,
-      time,
-      now: _now(),
-    );
-  }
-
   /*
   ============================================================
   CHECK IF SLOT IS ALREADY BOOKED
@@ -582,6 +800,120 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
 
   bool _isSlotBooked(TimeOfDay time) {
     return _bookedSlots.contains(appointmentSlotKey(_selectedDate, time));
+  }
+
+  bool _isSlotAvailableForSelectedService(TimeOfDay time) {
+    final service = _selectedService;
+    if (service == null) return false;
+    if (!appointmentSlotFitsClinicHours(time, service.durationMinutes)) {
+      return false;
+    }
+    if (!isAppointmentSlotAvailable(
+      _selectedDate,
+      time,
+      _bookedSlots,
+      closedDates: _closedDates,
+      availabilityVerified: _availabilityVerified && _closuresVerified,
+      now: _now(),
+    )) {
+      return false;
+    }
+
+    final partialClosures =
+        _partialClosuresByDate[_selectedDate] ?? const <PartialClinicClosure>[];
+    for (final closure in partialClosures) {
+      if (appointmentIntervalOverlaps(
+        slotStart: time,
+        slotDurationMinutes: service.durationMinutes,
+        intervalStart: closure.start,
+        intervalDurationMinutes:
+            _timeOfDayMinutes(closure.end) - _timeOfDayMinutes(closure.start),
+      )) {
+        return false;
+      }
+    }
+    final appointmentIntervals =
+        _appointmentIntervalsByDate[_selectedDate] ??
+        const <AppointmentInterval>[];
+    for (final appointment in appointmentIntervals) {
+      if (appointmentIntervalOverlaps(
+        slotStart: time,
+        slotDurationMinutes: service.durationMinutes,
+        intervalStart: appointment.start,
+        intervalDurationMinutes:
+            _timeOfDayMinutes(appointment.end) -
+            _timeOfDayMinutes(appointment.start),
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _isolateUnsafeAvailability() {
+    if (!mounted) return;
+    ++_availabilityRequestGeneration;
+    setState(() {
+      _refreshingAvailability = false;
+      _loadingAvailability = false;
+      _availabilityRequestInFlight = false;
+      _availabilityVerified = false;
+      _bookedSlots.clear();
+      _selectedTime = null;
+      _availabilityError =
+          'Secure patient appointment availability is unavailable. '
+          'Booking is temporarily disabled until secure backend availability is provided.';
+    });
+  }
+
+  Future<void> _loadServices() async {
+    if (!mounted) return;
+    final generation = ++_serviceRequestGeneration;
+    setState(() {
+      _loadingServices = true;
+      _serviceLoadError = null;
+    });
+    try {
+      final uri = Uri.parse('$apiBaseUrl/api/appointments/services');
+      final response = await _client
+          .get(uri, headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 404) {
+        if (!mounted || generation != _serviceRequestGeneration) return;
+        setState(() {
+          _serviceOptions = const [];
+          _selectedVisitType = null;
+          _selectedTime = null;
+          _serviceLoadError =
+              'No appointment services are currently available.';
+          _loadingServices = false;
+        });
+        return;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('Failed to load appointment services.');
+      }
+      final decoded = jsonDecode(response.body);
+      final services = parseAppointmentServices(decoded);
+      if (!mounted || generation != _serviceRequestGeneration) return;
+      setState(() {
+        _serviceOptions = services;
+        _loadingServices = false;
+        if (_selectedVisitType != null &&
+            !services.any((service) => service.name == _selectedVisitType)) {
+          _selectedVisitType = null;
+          _selectedTime = null;
+        }
+      });
+    } catch (_) {
+      if (!mounted || generation != _serviceRequestGeneration) return;
+      setState(() {
+        _serviceOptions = const [];
+        _serviceLoadError =
+            'Unable to load appointment services. Please try again.';
+        _loadingServices = false;
+      });
+    }
   }
 
   /*
@@ -602,146 +934,166 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
     bool forceRefresh = false,
   }) async {
     if (!mounted) return;
+    await _loadPatientAvailability();
+  }
 
-    if (_refreshingAvailability) {
-      if (forceRefresh) {
-        await _availabilityLoadCompleter?.future;
-        if (!mounted) return;
-        return _loadBookedSlots(showLoading: showLoading, forceRefresh: true);
-      }
+  Future<void> _loadPatientAvailability() async {
+    if (!mounted) return;
+    if (_availabilityRequestInFlight) return;
+    final generation = ++_availabilityRequestGeneration;
+
+    final patientId = widget.patientId?.toString().trim() ?? '';
+    final authenticatedPatientId = (widget.authenticatedPatientId ?? '').trim();
+    final token = _sessionService?.token?.trim() ?? '';
+    if (patientId.isEmpty ||
+        authenticatedPatientId.isEmpty ||
+        patientId != authenticatedPatientId ||
+        token.isEmpty) {
+      _isolateUnsafeAvailability();
       return;
     }
 
-    _refreshingAvailability = true;
-    _availabilityLoadCompleter = Completer<void>();
-
-    final currentSelectedTime = _selectedTime;
-
-    if (showLoading) {
-      setState(() {
-        _loadingAvailability = true;
-        _availabilityError = null;
-        _availabilityVerified = false;
-        _bookedSlots.clear();
-      });
-    }
+    setState(() {
+      _loadingAvailability = true;
+      _availabilityError = null;
+      _availabilityVerified = false;
+      _availabilityRequestInFlight = true;
+    });
 
     try {
-      final uri = Uri.parse('$apiBaseUrl/api/appointments');
-
-      debugPrint('APPOINTMENT AVAILABILITY REQUEST: $uri');
-
+      final uri = Uri.parse(
+        '$apiBaseUrl/api/appointments/patient/${Uri.encodeComponent(patientId)}',
+      );
       final response = await _client
-          .get(uri, headers: {'Accept': 'application/json'})
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+          )
           .timeout(const Duration(seconds: 15));
 
-      debugPrint(
-        'APPOINTMENT AVAILABILITY STATUS: '
-        '${response.statusCode}',
-      );
-
+      if (!mounted || generation != _availabilityRequestGeneration) return;
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        setState(() {
+          _loadingAvailability = false;
+          _availabilityRequestInFlight = false;
+          _availabilityVerified = false;
+          _availabilityError =
+              'Your sign-in session is no longer valid. Please sign in again.';
+          _appointmentIntervalsByDate = {};
+          _bookedSlots.clear();
+          _selectedTime = null;
+        });
+        return;
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('Failed to load appointment availability.');
+        throw Exception('Failed to load patient appointment availability.');
       }
 
       final decoded = jsonDecode(response.body);
-
       if (decoded is! List) {
-        throw Exception('Invalid appointment data received from server.');
+        throw const FormatException(
+          'Invalid patient appointment availability response.',
+        );
       }
 
-      final booked = <String>{};
-
+      final bookedSlots = <String>{};
+      final intervals = <DateTime, List<AppointmentInterval>>{};
       for (final item in decoded) {
         if (item is! Map) continue;
+        final status = (item['appointment_status'] ?? item['status'])
+            ?.toString()
+            .trim()
+            .toLowerCase();
+        if (!isAppointmentStatusBlocking(status)) continue;
 
-        if (!isAppointmentStatusBlocking(item['appointment_status'])) {
-          continue;
-        }
+        final rawDate =
+            (item['appointment_date'] ?? item['date'])?.toString().trim() ?? '';
+        final rawTime =
+            (item['appointment_time'] ?? item['time'])?.toString().trim() ?? '';
+        final appointmentDate = _parseClinicClosureDate(
+          rawDate.split('T').first,
+        );
+        final startTime = parseClinicClosureTime(rawTime);
+        if (appointmentDate == null || startTime == null) continue;
 
-        final rawDate = item['appointment_date']?.toString().trim() ?? '';
-        final rawTime = item['appointment_time']?.toString().trim() ?? '';
-        final appointmentDate = rawDate.split('T').first;
-        final timeMatch = RegExp(r'^(\d{1,2}):(\d{2})').firstMatch(rawTime);
-        if (timeMatch == null) continue;
-        final hour = int.tryParse(timeMatch.group(1)!);
-        final minute = int.tryParse(timeMatch.group(2)!);
-        if (hour == null ||
-            minute == null ||
-            hour < 0 ||
-            hour > 23 ||
-            minute < 0 ||
-            minute > 59) {
-          continue;
+        final purpose =
+            (item['purpose_of_visit'] ??
+                    item['purpose'] ??
+                    item['appointment_type'])
+                ?.toString()
+                .trim() ??
+            '';
+        var durationMinutes = _durationForAppointmentPurpose(purpose);
+
+        final rawEndTime =
+            (item['appointment_end_time'] ??
+                    item['end_time'] ??
+                    item['appointment_end'])
+                ?.toString()
+                .trim();
+        final storedEnd = parseClinicClosureTime(rawEndTime);
+        if (storedEnd != null &&
+            _timeOfDayMinutes(storedEnd) > _timeOfDayMinutes(startTime)) {
+          durationMinutes =
+              _timeOfDayMinutes(storedEnd) - _timeOfDayMinutes(startTime);
         }
-        final appointmentTime =
-            '${hour.toString().padLeft(2, '0')}:'
-            '${minute.toString().padLeft(2, '0')}';
-        if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(appointmentDate)) {
-          booked.add('$appointmentDate $appointmentTime');
-        }
+        durationMinutes ??= 30;
+
+        final endMinutes = _timeOfDayMinutes(startTime) + durationMinutes;
+        final endTime = TimeOfDay(
+          hour: (endMinutes ~/ 60) % 24,
+          minute: endMinutes % 60,
+        );
+        bookedSlots.add(appointmentSlotKey(appointmentDate, startTime));
+        intervals
+            .putIfAbsent(appointmentDate, () => [])
+            .add(AppointmentInterval(start: startTime, end: endTime));
       }
-
-      if (!mounted) return;
 
       setState(() {
         _bookedSlots
           ..clear()
-          ..addAll(booked);
-        _calendarAvailabilityRevision++;
+          ..addAll(bookedSlots);
+        _appointmentIntervalsByDate = intervals;
+        _loadingAvailability = false;
+        _availabilityRequestInFlight = false;
+        _refreshingAvailability = false;
         _availabilityVerified = true;
         _availabilityError = null;
-
-        /*
-        Keep the currently selected time if it is
-        still available.
-
-        Remove it only if:
-        - another booking took the slot, or
-        - the 20-minute cutoff has been reached.
-        */
-
-        if (currentSelectedTime != null) {
-          final selectedSlotBooked = _isSlotBooked(currentSelectedTime);
-
-          final selectedSlotClosed = _isPastTime(currentSelectedTime);
-
-          if (selectedSlotBooked || selectedSlotClosed) {
-            _selectedTime = null;
-          } else {
-            _selectedTime = currentSelectedTime;
-          }
-        }
-      });
-
-      debugPrint('BOOKED SLOTS: $_bookedSlots');
-    } catch (e, st) {
-      debugPrint('APPOINTMENT AVAILABILITY ERROR: $e');
-
-      debugPrint('APPOINTMENT AVAILABILITY STACK: $st');
-
-      if (!mounted) return;
-
-      setState(() {
         _calendarAvailabilityRevision++;
-        _availabilityVerified = false;
-        _bookedSlots.clear();
-        _selectedTime = null;
-        _availabilityError = 'Unable to load available appointment times.';
       });
-    } finally {
-      _refreshingAvailability = false;
-      final loadCompleter = _availabilityLoadCompleter;
-      _availabilityLoadCompleter = null;
-      if (loadCompleter != null && !loadCompleter.isCompleted) {
-        loadCompleter.complete();
-      }
-
-      if (mounted) {
-        setState(() {
-          _loadingAvailability = false;
-        });
-      }
+    } on TimeoutException {
+      if (!mounted || generation != _availabilityRequestGeneration) return;
+      setState(() {
+        _loadingAvailability = false;
+        _availabilityRequestInFlight = false;
+        _availabilityVerified = false;
+        _availabilityError =
+            'The appointment availability request timed out. Please try again.';
+        _selectedTime = null;
+      });
+    } on http.ClientException {
+      if (!mounted || generation != _availabilityRequestGeneration) return;
+      setState(() {
+        _loadingAvailability = false;
+        _availabilityRequestInFlight = false;
+        _availabilityVerified = false;
+        _availabilityError =
+            'Unable to reach the clinic service. Check your connection.';
+        _selectedTime = null;
+      });
+    } catch (_) {
+      if (!mounted || generation != _availabilityRequestGeneration) return;
+      setState(() {
+        _loadingAvailability = false;
+        _availabilityRequestInFlight = false;
+        _availabilityVerified = false;
+        _availabilityError = 'Unable to load patient appointment availability.';
+        _selectedTime = null;
+      });
     }
   }
 
@@ -757,9 +1109,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
   Future<void> _refreshAvailability() async {
     if (!mounted) return;
 
-    if (_loadingAvailability ||
-        _refreshingAvailability ||
-        _creatingAppointment) {
+    if (_loadingAvailability || _refreshingAvailability) {
       return;
     }
 
@@ -818,9 +1168,11 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
       responseShape = clinicClosureResponseShape(decoded);
       late final Set<DateTime> nextClosedDates;
       late final Map<DateTime, Set<String>> nextClosureReasons;
+      late final Map<DateTime, List<PartialClinicClosure>> partialClosures;
       try {
         nextClosedDates = parseClinicClosureDates(decoded);
         nextClosureReasons = parseClinicClosureReasons(decoded);
+        partialClosures = parsePartialClinicClosures(decoded);
       } on FormatException {
         failureReason = 'unsupported_json_shape_or_date';
         rethrow;
@@ -837,6 +1189,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
       setState(() {
         _closedDates.clear();
         _closedDates.addAll(nextClosedDates);
+        _partialClosuresByDate = partialClosures;
         _calendarAvailabilityRevision++;
         _closureReasonsByDate = nextClosureReasons;
         _closuresVerified = true;
@@ -874,6 +1227,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
         _calendarAvailabilityRevision++;
         _closedDates.clear();
         _closureReasonsByDate = {};
+        _partialClosuresByDate = {};
         _closuresVerified = false;
         _closureError = 'Unable to verify clinic closure dates. Try again.';
         _selectedTime = null;
@@ -909,8 +1263,9 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
       );
     }
 
+    _loadServices();
     _loadClosedDates();
-    _loadBookedSlots();
+    _loadPatientAvailability();
 
     /*
     Refresh appointment availability every 10 seconds.
@@ -958,6 +1313,227 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
   CREATE APPOINTMENT
   ============================================================
   */
+
+  Future<String?> _authenticatedPatientIdFromSession() async {
+    final token = _sessionService?.token?.trim();
+    if (token == null || token.isEmpty) return null;
+    final response = await _client
+        .get(
+          Uri.parse('$apiBaseUrl/api/patients/auth/me'),
+          headers: {
+            'Accept': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) return null;
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map) {
+      final map = Map<String, dynamic>.from(decoded);
+      final patient = map['patient'] is Map
+          ? Map<String, dynamic>.from(map['patient'] as Map)
+          : map['data'] is Map
+          ? Map<String, dynamic>.from(map['data'] as Map)
+          : map;
+      final id = (patient['patient_id'] ?? patient['user_id'] ?? patient['id'])
+          ?.toString()
+          .trim();
+      return id?.isNotEmpty == true ? id : null;
+    }
+    return null;
+  }
+
+  Future<void> _submitAppointment({
+    required DateTime selectedDate,
+    required TimeOfDay selectedTime,
+    required String patientId,
+    required String authenticatedPatientId,
+    required AppointmentServiceOption service,
+  }) async {
+    if (_isSubmitting) return;
+    setState(() => _isSubmitting = true);
+
+    try {
+      final serverPatientId = await _authenticatedPatientIdFromSession();
+      if (!mounted) return;
+      if (serverPatientId == null ||
+          serverPatientId != patientId ||
+          serverPatientId != authenticatedPatientId) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Your patient account could not be verified. Please sign in again.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      await _loadPatientAvailability();
+      if (!mounted) return;
+      if (!_availabilityVerified || _availabilityError != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _availabilityError ??
+                  'Appointment availability could not be verified.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      if (!_isSlotAvailableForSelectedService(selectedTime) ||
+          !appointmentSlotFitsClinicHours(
+            selectedTime,
+            service.durationMinutes,
+          )) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'That appointment time is no longer available. Please choose another time.',
+            ),
+          ),
+        );
+        await _loadPatientAvailability();
+        return;
+      }
+
+      final token = _sessionService?.token?.trim();
+      if (token == null || token.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please sign in again to book an appointment.'),
+          ),
+        );
+        return;
+      }
+
+      final appointmentDate =
+          '${selectedDate.year.toString().padLeft(4, '0')}-'
+          '${selectedDate.month.toString().padLeft(2, '0')}-'
+          '${selectedDate.day.toString().padLeft(2, '0')}';
+      final appointmentTime =
+          '${selectedTime.hour.toString().padLeft(2, '0')}:'
+          '${selectedTime.minute.toString().padLeft(2, '0')}:00';
+
+      final response = await _client
+          .post(
+            Uri.parse('$apiBaseUrl/api/appointments'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({
+              'patient_id': serverPatientId,
+              'appointment_date': appointmentDate,
+              'appointment_time': appointmentTime,
+              'purpose_of_visit': service.name,
+              'appointment_status': 'Requested',
+              'appointment_source': 'mobile',
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      Map<String, dynamic> data = {};
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map) data = Map<String, dynamic>.from(decoded);
+      } on FormatException {
+        data = {};
+      }
+
+      if (response.statusCode == 201 ||
+          (response.statusCode == 200 && data['success'] == true)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Appointment request sent successfully!'),
+          ),
+        );
+        setState(() {
+          _selectedVisitType = null;
+          _selectedTime = null;
+        });
+        await widget.onScheduled();
+        await _loadPatientAvailability();
+        return;
+      }
+
+      if (response.statusCode == 409) {
+        await _loadPatientAvailability();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              data['error']?.toString() ??
+                  data['message']?.toString() ??
+                  'This time slot was just reserved. Please select another time.',
+            ),
+          ),
+        );
+        setState(() => _selectedTime = null);
+        return;
+      }
+
+      String message;
+      switch (response.statusCode) {
+        case 400:
+          message =
+              data['error']?.toString() ??
+              data['message']?.toString() ??
+              'Please review the appointment details and try again.';
+          break;
+        case 401:
+        case 403:
+          message =
+              'Your sign-in session is no longer valid. Please sign in again.';
+          break;
+        case 500:
+          message =
+              'The clinic could not create the appointment. Please try again.';
+          break;
+        default:
+          message =
+              data['error']?.toString() ??
+              data['message']?.toString() ??
+              'The appointment could not be submitted. Please try again.';
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } on TimeoutException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The request timed out. Please try again.'),
+        ),
+      );
+    } on http.ClientException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unable to reach the clinic service. Check your connection.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'The appointment could not be submitted. Please try again.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
 
   Future<void> _createAppointment() async {
     final appointmentType = (_selectedVisitType ?? '').trim();
@@ -1131,183 +1707,70 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
       return;
     }
 
-    setState(() {
-      _creatingAppointment = true;
-    });
-
-    try {
-      final uri = Uri.parse('$apiBaseUrl/api/appointments');
-
-      final appointmentDate = _formatDate(selectedDateForSubmission);
-
-      final appointmentTime = _toMysqlTime(selectedTimeForSubmission);
-
-      /*
-      The provider has been removed.
-
-      The appointment type is now sent directly
-      as the purpose of visit.
-      */
-
-      final purposeOfVisit = appointmentType;
-
-      debugPrint('APPOINTMENT REQUEST URL: $uri');
-
-      debugPrint(
-        'APPOINTMENT REQUEST DATA: '
-        'patient_id=$patientId, '
-        'date=$appointmentDate, '
-        'time=$appointmentTime, '
-        'purpose=$purposeOfVisit',
-      );
-
-      final response = await _client
-          .post(
-            uri,
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-            },
-            body: jsonEncode({
-              'patient_id': patientId,
-              'appointment_date': appointmentDate,
-              'appointment_time': appointmentTime,
-              'purpose_of_visit': purposeOfVisit,
-
-              /*
-              Appointment requests from the mobile
-              application enter the admin queue
-              as Requested.
-              */
-              'appointment_status': 'Requested',
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      debugPrint(
-        'APPOINTMENT REQUEST STATUS: '
-        '${response.statusCode}',
-      );
-
-      debugPrint(
-        'APPOINTMENT REQUEST RESPONSE: '
-        '${response.body}',
-      );
-
-      final body = response.body.trim();
-
-      Map<String, dynamic> data = {};
-
-      if (body.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(body);
-
-          if (decoded is Map<String, dynamic>) {
-            data = decoded;
-          }
-        } catch (_) {
-          debugPrint(
-            'APPOINTMENT REQUEST: '
-            'Invalid JSON response.',
-          );
-        }
-      }
-
-      if (!mounted) return;
-
-      /*
-      ----------------------------------------------------------
-      SUCCESS
-      ----------------------------------------------------------
-      */
-
-      if (response.statusCode == 201) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Appointment request sent successfully!'),
-          ),
-        );
-
-        _selectedVisitType = null;
-
-        setState(() {
-          _selectedTime = null;
-        });
-
-        /*
-        Immediately refresh availability so the
-        newly requested slot becomes unavailable.
-        */
-
-        await _loadBookedSlots();
-
-        await widget.onScheduled();
-      }
-      /*
-      ----------------------------------------------------------
-      SLOT ALREADY RESERVED
-      ----------------------------------------------------------
-      */
-      else if (response.statusCode == 409) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              data['error']?.toString() ??
-                  'This time slot is already reserved.',
-            ),
-          ),
-        );
-
-        await _loadBookedSlots();
-      }
-      /*
-      ----------------------------------------------------------
-      BAD REQUEST
-      ----------------------------------------------------------
-      */
-      else if (response.statusCode == 400) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              data['error']?.toString() ??
-                  'Please provide all required appointment details.',
-            ),
-          ),
-        );
-      }
-      /*
-      ----------------------------------------------------------
-      OTHER SERVER ERROR
-      ----------------------------------------------------------
-      */
-      else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              data['error']?.toString() ??
-                  data['message']?.toString() ??
-                  'Could not send appointment request.',
-            ),
-          ),
-        );
-      }
-    } catch (e, st) {
-      debugPrint('APPOINTMENT REQUEST EXCEPTION: $e');
-
-      debugPrint('APPOINTMENT REQUEST STACK: $st');
-
-      if (!mounted) return;
-
+    final authenticatedPatientId = (widget.authenticatedPatientId ?? patientId)
+        .trim();
+    if (authenticatedPatientId != patientId ||
+        _sessionService?.token?.trim().isNotEmpty != true) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Unable to send appointment request: $e')),
+        const SnackBar(
+          content: Text(
+            'Secure patient appointment booking is unavailable. '
+            'Please sign in again with a verified patient account.',
+          ),
+        ),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _creatingAppointment = false;
-        });
-      }
+      return;
     }
+
+    final service = _selectedService;
+    if (service == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select a valid appointment service.'),
+        ),
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Confirm appointment request?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Date: ${_formatDate(selectedDateForSubmission)}'),
+            const SizedBox(height: 6),
+            Text(
+              'Time: ${selectedTimeForSubmission.format(context)} '
+              '– ${_formatEndTime(selectedTimeForSubmission, service.durationMinutes)}',
+            ),
+            const SizedBox(height: 6),
+            Text('Purpose: ${service.name}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Review details'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Book appointment'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _submitAppointment(
+      selectedDate: selectedDateForSubmission,
+      selectedTime: selectedTimeForSubmission,
+      patientId: patientId,
+      authenticatedPatientId: authenticatedPatientId,
+      service: service,
+    );
   }
 
   /*
@@ -1496,7 +1959,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
                   ],
                 ),
               )
-            else
+            else ...[
               ..._closedDatesInVisibleMonth().map(
                 (date) => Padding(
                   padding: const EdgeInsets.only(bottom: 6),
@@ -1529,6 +1992,47 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
                   ),
                 ),
               ),
+              ..._partialClosuresInVisibleMonth().map(
+                (entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${MaterialLocalizations.of(context).formatShortDate(entry.$1)} • PARTIAL CLOSURE',
+                        key: ValueKey(
+                          'partial-clinic-closure-${_formatDate(entry.$1)}',
+                        ),
+                        style: const TextStyle(
+                          color: Color(0xFFB3261E),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      for (final closure in entry.$2)
+                        Text(
+                          '${_formatTime(closure.start)}–${_formatTime(closure.end)}',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            fontSize: 12,
+                          ),
+                        ),
+                      for (final reason
+                          in _closureReasonsByDate[entry.$1] ??
+                              const {'No reason provided.'})
+                        Text(
+                          'Reason: $reason',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -1546,6 +2050,21 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
             .toList()
           ..sort((a, b) => a.compareTo(b));
     return dates;
+  }
+
+  List<(DateTime, List<PartialClinicClosure>)>
+  _partialClosuresInVisibleMonth() {
+    final entries =
+        _partialClosuresByDate.entries
+            .where(
+              (entry) =>
+                  entry.key.year == _visibleMonth.year &&
+                  entry.key.month == _visibleMonth.month,
+            )
+            .map((entry) => (entry.key, entry.value))
+            .toList()
+          ..sort((a, b) => a.$1.compareTo(b.$1));
+    return entries;
   }
 
   /*
@@ -1586,6 +2105,19 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
               'Closed on Sunday • Clinic hours: 8:00 AM - 5:30 PM',
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
+
+            if (_selectedTime != null && _selectedService != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Selected time: ${_selectedTime!.format(context)} '
+                '– ${_formatEndTime(_selectedTime!, _selectedService!.durationMinutes)}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF0F76FF),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 16),
 
@@ -1675,15 +2207,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
                 children: _operatingTimeSlots.map((time) {
                   final booked = _isSlotBooked(time);
 
-                  final available = isAppointmentSlotAvailable(
-                    _selectedDate,
-                    time,
-                    _bookedSlots,
-                    closedDates: _closedDates,
-                    availabilityVerified:
-                        _availabilityVerified && _closuresVerified,
-                    now: now,
-                  );
+                  final available = _isSlotAvailableForSelectedService(time);
                   final past = isAppointmentSlotWithinBookingCutoff(
                     _selectedDate,
                     time,
@@ -1702,15 +2226,7 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
                       onPressed: disabled
                           ? null
                           : () {
-                              if (!isAppointmentSlotAvailable(
-                                _selectedDate,
-                                time,
-                                _bookedSlots,
-                                closedDates: _closedDates,
-                                availabilityVerified:
-                                    _availabilityVerified && _closuresVerified,
-                                now: _now(),
-                              )) {
+                              if (!_isSlotAvailableForSelectedService(time)) {
                                 setState(() {
                                   _selectedTime = null;
                                 });
@@ -1811,28 +2327,71 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
 
             const SizedBox(height: 14),
 
-            DropdownButtonFormField<String>(
-              initialValue: _selectedVisitType,
-              decoration: const InputDecoration(
-                labelText: 'Purpose of Visit',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.assignment_outlined),
+            if (_loadingServices)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: LinearProgressIndicator(),
+              )
+            else if (_serviceLoadError != null)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    _serviceLoadError!,
+                    style: TextStyle(color: Colors.red.shade700),
+                  ),
+                  TextButton(
+                    onPressed: _loadServices,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              )
+            else if (_serviceOptions.isEmpty)
+              const Text(
+                'No appointment services are currently available.',
+                style: TextStyle(color: Colors.black54),
+              )
+            else
+              DropdownButtonFormField<String>(
+                initialValue: _selectedVisitType,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Purpose of Visit',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.assignment_outlined),
+                ),
+                hint: const Text('Select purpose of visit'),
+                selectedItemBuilder: (context) => _serviceOptions
+                    .map(
+                      (service) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '${service.name} — ${service.durationMinutes} min',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    )
+                    .toList(),
+                items: _serviceOptions
+                    .map(
+                      (service) => DropdownMenuItem<String>(
+                        value: service.name,
+                        child: Text(
+                          '${service.name} — ${service.durationMinutes} min',
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  setState(() {
+                    _selectedVisitType = value;
+                    _selectedTime = null;
+                  });
+                  _calendarAvailabilityRevision++;
+                  setState(() {});
+                },
               ),
-              hint: const Text('Select purpose of visit'),
-              items: _visitTypeOptions
-                  .map(
-                    (option) => DropdownMenuItem<String>(
-                      value: option,
-                      child: Text(option),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) {
-                setState(() {
-                  _selectedVisitType = value;
-                });
-              },
-            ),
           ],
         ),
       ),
@@ -1969,7 +2528,13 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
     return SizedBox(
       height: 52,
       child: ElevatedButton(
-        onPressed: _creatingAppointment || !_closuresVerified
+        onPressed:
+            _isSubmitting ||
+                !_closuresVerified ||
+                _loadingServices ||
+                _serviceOptions.isEmpty ||
+                _selectedService == null ||
+                !_availabilityVerified
             ? null
             : _createAppointment,
         style: ElevatedButton.styleFrom(
@@ -1979,8 +2544,11 @@ class _AppointmentSchedulerScreenState extends State<AppointmentSchedulerScreen>
             borderRadius: BorderRadius.circular(18),
           ),
         ),
-        child: _creatingAppointment
-            ? const CircularProgressIndicator(color: Colors.white)
+        child: _isSubmitting
+            ? const Text(
+                'Booking...',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+              )
             : const Text(
                 'Confirm Appointment',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),

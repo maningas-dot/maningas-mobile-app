@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:optcare_app/main.dart';
+import 'package:optcare_app/services/patient_session_service.dart';
 import 'package:optcare_app/transaction_history_screen.dart';
 
 void main() {
@@ -11,6 +14,7 @@ void main() {
     (tester) async {
       const patientId = 'synthetic-patient-transaction-nav';
       var transactionRequests = 0;
+      final sessionService = await _loggedInSessionService();
       final previousDebugPrint = debugPrint;
       debugPrint = (message, {wrapWidth}) {};
 
@@ -18,8 +22,11 @@ void main() {
         await http.runWithClient(
           () async {
             await tester.pumpWidget(
-              const MaterialApp(
-                home: DashboardScreen(profileData: {'patient_id': patientId}),
+              MaterialApp(
+                home: DashboardScreen(
+                  profileData: const {'patient_id': patientId},
+                  sessionService: sessionService,
+                ),
               ),
             );
             await tester.pumpAndSettle();
@@ -122,13 +129,19 @@ void main() {
             expect(find.text('Quick actions'), findsNothing);
             expect(find.text('Your transactions'), findsOneWidget);
             expect(
+              find.byKey(const ValueKey('transaction-refresh')),
+              findsOneWidget,
+            );
+            expect(
               find.text('Review your purchases and payment details.'),
               findsOneWidget,
             );
-            final transactionHeader = find.ancestor(
-              of: find.text('Your transactions'),
-              matching: find.byType(DecoratedBox),
-            ).last;
+            final transactionHeader = find
+                .ancestor(
+                  of: find.text('Your transactions'),
+                  matching: find.byType(DecoratedBox),
+                )
+                .last;
             final transactionAppBarBottom = tester
                 .getBottomLeft(find.byType(AppBar))
                 .dy;
@@ -228,16 +241,83 @@ void main() {
             expect(find.text('Patient ID'), findsWidgets);
           },
           () => MockClient((request) async {
+            final path = request.url.path;
             if (request.method == 'GET' &&
-                request.url.path == '/api/patients/$patientId/transactions') {
+                path == '/api/patients/$patientId/transactions') {
               transactionRequests++;
-              return http.Response('[]', 200);
+              expect(request.headers['authorization'], 'Bearer test-token');
+              expect(request.url.queryParameters['page'], '1');
+              expect(request.url.queryParameters['limit'], '10');
+              return http.Response(
+                jsonEncode({
+                  'success': true,
+                  'transactions': [],
+                  'pagination': {
+                    'page': 1,
+                    'limit': 10,
+                    'total': 0,
+                    'totalPages': 0,
+                  },
+                }),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
+            }
+            if (request.method == 'GET' && path == '/api/patients/$patientId') {
+              return http.Response(
+                jsonEncode({}),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
             }
             if (request.method == 'GET' &&
-                request.url.path == '/api/patients/$patientId') {
-              return http.Response('{}', 200);
+                path.contains('/api/appointments/patient/')) {
+              return http.Response(
+                jsonEncode([]),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
             }
-            return http.Response('[]', 200);
+            if (request.method == 'GET' && path == '/api/frames/page') {
+              return http.Response(
+                jsonEncode({
+                  'items': [],
+                  'categories': [],
+                  'pagination': {
+                    'page': 1,
+                    'limit': 10,
+                    'total': 0,
+                    'totalPages': 0,
+                  },
+                }),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
+            }
+            if (request.method == 'GET' &&
+                path.contains('/api/notifications/patient/')) {
+              return http.Response(
+                jsonEncode([]),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
+            }
+            if (request.method == 'GET' &&
+                path.endsWith('/api/patients/auth/me')) {
+              return http.Response(
+                jsonEncode({
+                  'success': true,
+                  'patient': {'patient_id': patientId},
+                }),
+                200,
+                headers: {'content-type': 'application/json'},
+              );
+            }
+            return http.Response(
+              jsonEncode([]),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
           }),
         );
       } finally {
@@ -245,4 +325,47 @@ void main() {
       }
     },
   );
+}
+
+Future<PatientSessionService> _loggedInSessionService() async {
+  final service = PatientSessionService(
+    tokenStorage: _MemoryTokenStorage(),
+    client: MockClient((request) async {
+      if (request.url.path.endsWith('/api/patients/login')) {
+        return http.Response(
+          jsonEncode({
+            'token': 'test-token',
+            'patient': {'patient_id': 'synthetic-patient-transaction-nav'},
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('{}', 404);
+    }),
+  );
+
+  await service.login(
+    email: 'user@example.com',
+    password: 'password',
+    rememberMe: false,
+  );
+  return service;
+}
+
+class _MemoryTokenStorage implements PatientTokenStorage {
+  String? _token;
+
+  @override
+  Future<String?> readToken() async => _token;
+
+  @override
+  Future<void> writeToken(String token) async {
+    _token = token;
+  }
+
+  @override
+  Future<void> deleteToken() async {
+    _token = null;
+  }
 }

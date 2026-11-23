@@ -1940,6 +1940,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   static const int _appointmentsPerPage = 10;
+  static const int _framesPerPage = 10;
 
   late final PatientSessionService _sessionService =
       widget.sessionService ?? patientSessionService;
@@ -1955,8 +1956,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _loadingAppointments = false;
   bool _loadingFrames = false;
   bool _framesError = false;
-
-  String? _framesErrorMessage;
+  bool _framesRefreshError = false;
 
   List<dynamic> _appointments = [];
   final Set<String> _appointmentCancellationDialogsOpen = {};
@@ -1971,56 +1971,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   List<FrameModel> _frames = [];
+  List<String> _frameCategories = [];
 
   final TextEditingController _frameSearchController = TextEditingController();
 
   String _frameSearchQuery = '';
 
   String _selectedFrameCategory = 'All';
-
-  List<FrameModel> get _filteredFrames {
-    final query = _frameSearchQuery.trim().toLowerCase();
-
-    return _frames.where((frame) {
-      final name = frame.name.toLowerCase();
-
-      final brand = (frame.brand ?? '').toLowerCase();
-
-      final material = (frame.material ?? '').toLowerCase();
-
-      final category = (frame.category ?? '').toLowerCase();
-
-      final matchesSearch =
-          query.isEmpty ||
-          name.contains(query) ||
-          brand.contains(query) ||
-          material.contains(query) ||
-          category.contains(query);
-
-      final matchesCategory =
-          _selectedFrameCategory == 'All' ||
-          category == _selectedFrameCategory.toLowerCase();
-
-      return matchesSearch && matchesCategory;
-    }).toList();
-  }
-
-  List<String> get _frameCategories {
-    final categories = <String>{};
-
-    for (final frame in _frames) {
-      final category = frame.category?.trim();
-
-      if (category != null && category.isNotEmpty) {
-        categories.add(category);
-      }
-    }
-
-    final sortedCategories = categories.toList()
-      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-
-    return ['All', ...sortedCategories];
-  }
+  String _frameSort = 'newest';
+  String _frameAvailability = 'all';
+  int _frameCurrentPage = 1;
+  int _frameTotal = 0;
+  int _frameTotalPages = 0;
+  Timer? _frameSearchDebounce;
+  int _frameRequestGeneration = 0;
+  String? _frameRequestSignature;
 
   @override
   void initState() {
@@ -2202,33 +2167,111 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final rawDate = appointment['appointment_date']?.toString().trim() ?? '';
     final rawTime = appointment['appointment_time']?.toString().trim() ?? '';
-    if (rawDate.isEmpty || rawTime.isEmpty) return null;
+    if (rawDate.isEmpty) return null;
 
-    return DateTime.tryParse('${rawDate.split('T').first}T$rawTime');
+    final dateOnly = rawDate.split('T').first;
+    if (rawTime.isEmpty) return DateTime.tryParse('${dateOnly}T00:00:00');
+
+    final match = RegExp(
+      r'^(\d{1,2}):(\d{2})(?::(\d{2}))?$',
+    ).firstMatch(rawTime);
+    if (match == null) return DateTime.tryParse('${dateOnly}T$rawTime');
+    final hour = int.tryParse(match.group(1)!);
+    final minute = int.tryParse(match.group(2)!);
+    final second = int.tryParse(match.group(3) ?? '0') ?? 0;
+    if (hour == null || minute == null || hour > 23 || minute > 59) {
+      return null;
+    }
+    final parsedDate = DateTime.tryParse(dateOnly);
+    if (parsedDate == null) return null;
+    return DateTime(
+      parsedDate.year,
+      parsedDate.month,
+      parsedDate.day,
+      hour,
+      minute,
+      second,
+    );
   }
 
   List<dynamic> _sortAppointments(List<dynamic> appointments) {
-    final indexedAppointments = List<MapEntry<int, dynamic>>.generate(
-      appointments.length,
-      (index) => MapEntry(index, appointments[index]),
-    );
+    final unique = <String, dynamic>{};
+    final indexByKey = <String, int>{};
 
-    indexedAppointments.sort((a, b) {
-      final aDateTime = _appointmentDateTime(a.value);
-      final bDateTime = _appointmentDateTime(b.value);
-      if (aDateTime == null && bDateTime == null) {
-        return a.key.compareTo(b.key);
+    for (var index = 0; index < appointments.length; index++) {
+      final appointment = appointments[index];
+      if (appointment is! Map) continue;
+      final id = appointment['appointment_id']?.toString().trim() ?? '';
+      final key = id.isNotEmpty
+          ? 'id:$id'
+          : 'record:${appointment['appointment_date']}|'
+                '${appointment['appointment_time']}|'
+                '${appointment['provider']}|'
+                '${appointment['purpose_of_visit']}';
+      if (unique.putIfAbsent(key, () => appointment) == appointment) {
+        indexByKey[key] = index;
       }
-      if (aDateTime == null) return 1;
-      if (bDateTime == null) return -1;
+    }
 
-      final byDateTime = bDateTime.compareTo(aDateTime);
-      return byDateTime == 0 ? a.key.compareTo(b.key) : byDateTime;
+    final scheduled = <dynamic>[];
+    final invalid = <dynamic>[];
+
+    for (final appointment in unique.values) {
+      final dateTime = _appointmentDateTime(appointment);
+      if (dateTime == null) {
+        invalid.add(appointment);
+      } else {
+        scheduled.add(appointment);
+      }
+    }
+
+    int byScheduledTime(dynamic a, dynamic b) {
+      final aKey =
+          (a is Map &&
+              (a['appointment_id']?.toString().trim() ?? '').isNotEmpty)
+          ? 'id:${a['appointment_id']}'
+          : 'record:${a['appointment_date']}|'
+                '${a['appointment_time']}|'
+                '${a['provider']}|'
+                '${a['purpose_of_visit']}';
+      final bKey =
+          (b is Map &&
+              (b['appointment_id']?.toString().trim() ?? '').isNotEmpty)
+          ? 'id:${b['appointment_id']}'
+          : 'record:${b['appointment_date']}|'
+                '${b['appointment_time']}|'
+                '${b['provider']}|'
+                '${b['purpose_of_visit']}';
+      final aScheduled = _appointmentDateTime(a);
+      final bScheduled = _appointmentDateTime(b);
+      if (aScheduled == null || bScheduled == null) return 0;
+      final comparison = bScheduled.compareTo(aScheduled);
+      if (comparison != 0) return comparison;
+      return (indexByKey[aKey] ?? 0).compareTo(indexByKey[bKey] ?? 0);
+    }
+
+    scheduled.sort(byScheduledTime);
+    invalid.sort((a, b) {
+      final aKey =
+          (a is Map &&
+              (a['appointment_id']?.toString().trim() ?? '').isNotEmpty)
+          ? 'id:${a['appointment_id']}'
+          : 'record:${a['appointment_date']}|'
+                '${a['appointment_time']}|'
+                '${a['provider']}|'
+                '${a['purpose_of_visit']}';
+      final bKey =
+          (b is Map &&
+              (b['appointment_id']?.toString().trim() ?? '').isNotEmpty)
+          ? 'id:${b['appointment_id']}'
+          : 'record:${b['appointment_date']}|'
+                '${b['appointment_time']}|'
+                '${b['provider']}|'
+                '${b['purpose_of_visit']}';
+      return (indexByKey[aKey] ?? 0).compareTo(indexByKey[bKey] ?? 0);
     });
 
-    return indexedAppointments
-        .map((entry) => entry.value)
-        .toList(growable: false);
+    return [...scheduled, ...invalid];
   }
 
   Future<void> _loadAppointments() async {
@@ -2262,8 +2305,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       debugPrint('APPOINTMENTS API REQUEST: $uri');
 
+      final headers = <String, String>{...jsonHeaders};
+      final token = _sessionService.token?.trim();
+      if (token != null && token.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $token';
+      }
       final response = await http
-          .get(uri, headers: jsonHeaders)
+          .get(uri, headers: headers)
           .timeout(const Duration(seconds: 15));
 
       debugPrint(
@@ -2411,10 +2459,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         '$apiBaseUrl/api/appointments/patient/'
         '${Uri.encodeComponent(appointmentId)}/cancel',
       );
+      final headers = <String, String>{...jsonHeaders};
+      final token = _sessionService.token?.trim();
+      if (token != null && token.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $token';
+      }
       final response = await http
           .patch(
             uri,
-            headers: jsonHeaders,
+            headers: headers,
             body: jsonEncode({'patient_id': patientId}),
           )
           .timeout(const Duration(seconds: 15));
@@ -2453,39 +2506,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       await _loadAppointments();
-
-      var availabilityRefreshed = false;
-      try {
-        final availabilityResponse = await http
-            .get(
-              Uri.parse('$apiBaseUrl/api/appointments'),
-              headers: jsonHeaders,
-            )
-            .timeout(const Duration(seconds: 15));
-        if (availabilityResponse.statusCode < 200 ||
-            availabilityResponse.statusCode >= 300 ||
-            jsonDecode(availabilityResponse.body) is! List) {
-          throw const FormatException(
-            'Invalid appointment availability response.',
-          );
-        }
-        availabilityRefreshed = true;
-      } catch (error, stackTrace) {
-        debugPrint('APPOINTMENT AVAILABILITY REFRESH ERROR: $error');
-        debugPrint('APPOINTMENT AVAILABILITY REFRESH STACK: $stackTrace');
-      }
-
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              availabilityRefreshed
-                  ? 'Appointment cancelled.'
-                  : 'Appointment cancelled, but availability could not be '
-                        'refreshed. Reopen the scheduler before booking.',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Appointment cancelled.')));
       }
     } catch (error, stackTrace) {
       debugPrint('APPOINTMENT CANCELLATION ERROR: $error');
@@ -2510,110 +2534,163 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   // =====================================================
   // LOAD FRAME MODELS
-  // GET /api/frames
+  // GET /api/frames/page
   // =====================================================
 
-  Future<void> _loadFrames() async {
+  Future<void> _loadFrames({bool allowPageRecovery = true}) async {
     if (!mounted) return;
 
+    final search = _frameSearchQuery.trim();
+    final queryParameters = <String, String>{
+      'page': _frameCurrentPage.toString(),
+      'limit': _framesPerPage.toString(),
+      'search': search,
+      'category': _selectedFrameCategory,
+      'availability': _frameAvailability,
+      'sort': _frameSort,
+    };
+    if (search.isEmpty) {
+      queryParameters.remove('search');
+    }
+    if (_selectedFrameCategory == 'All') {
+      queryParameters.remove('category');
+    }
+
+    final requestSignature =
+        '$_frameCurrentPage|${queryParameters['search'] ?? ''}|'
+        '${queryParameters['category'] ?? 'All'}|$_frameAvailability|$_frameSort';
+    if (_frameRequestSignature == requestSignature && _loadingFrames) {
+      return;
+    }
+
+    _frameRequestSignature = requestSignature;
+    final generation = ++_frameRequestGeneration;
     setState(() {
       _loadingFrames = true;
       _framesError = false;
-      _framesErrorMessage = null;
+      _framesRefreshError = false;
     });
 
     try {
-      final uri = Uri.parse('$apiBaseUrl/api/frames');
-
-      debugPrint('FRAME API REQUEST: $uri');
+      final uri = Uri.parse(
+        '$apiBaseUrl/api/frames/page',
+      ).replace(queryParameters: queryParameters);
 
       final response = await http
           .get(uri, headers: jsonHeaders)
           .timeout(const Duration(seconds: 20));
 
-      debugPrint(
-        'FRAME API STATUS: '
-        '${response.statusCode}',
-      );
-
-      debugPrint(
-        'FRAME API RESPONSE: '
-        '${response.body}',
-      );
-
-      if (!mounted) return;
+      if (!mounted || generation != _frameRequestGeneration) return;
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded is List) {
-          final frames = decoded
-              .whereType<Map<String, dynamic>>()
-              .map((item) => FrameModel.fromJson(item))
-              .toList();
-
+        Map<String, dynamic> decoded;
+        try {
+          final value = jsonDecode(response.body);
+          if (value is! Map<String, dynamic>) {
+            throw const FormatException('Invalid frames response');
+          }
+          decoded = value;
+        } catch (_) {
           setState(() {
-            _frames = frames;
-            _framesError = false;
-            _framesErrorMessage = null;
+            _framesError = _frames.isEmpty;
+            _framesRefreshError = _frames.isNotEmpty;
           });
-
-          debugPrint(
-            'FRAME LOAD SUCCESS: '
-            '${_frames.length} frame(s)',
-          );
-        } else {
-          debugPrint(
-            'FRAME API ERROR: '
-            'Expected List but received '
-            '${decoded.runtimeType}',
-          );
-
-          setState(() {
-            _frames = [];
-            _framesError = true;
-            _framesErrorMessage =
-                'Unexpected frame data received from the server.';
-          });
+          return;
         }
 
+        final rawItems = decoded['items'];
+        final rawPagination = decoded['pagination'];
+        final rawCategories = decoded['categories'];
+        if (rawItems is! List ||
+            rawPagination is! Map ||
+            rawCategories is! List) {
+          setState(() {
+            _framesError = _frames.isEmpty;
+            _framesRefreshError = _frames.isNotEmpty;
+          });
+          return;
+        }
+
+        final page = rawPagination['page'];
+        final limit = rawPagination['limit'];
+        final total = rawPagination['total'];
+        final totalPages = rawPagination['totalPages'];
+        if (page is! int ||
+            limit is! int ||
+            total is! int ||
+            totalPages is! int ||
+            limit != _framesPerPage ||
+            page < 1 ||
+            page != _frameCurrentPage ||
+            total < 0 ||
+            totalPages < 0 ||
+            (totalPages == 0 && total != 0)) {
+          setState(() {
+            _framesError = _frames.isEmpty;
+            _framesRefreshError = _frames.isNotEmpty;
+          });
+          return;
+        }
+
+        if (allowPageRecovery &&
+            totalPages > 0 &&
+            _frameCurrentPage > totalPages) {
+          setState(() {
+            _frameCurrentPage = totalPages;
+            _frameRequestSignature = null;
+          });
+          await _loadFrames(allowPageRecovery: false);
+          return;
+        }
+
+        if (allowPageRecovery && totalPages == 0 && _frameCurrentPage > 1) {
+          setState(() {
+            _frameCurrentPage = 1;
+            _frameRequestSignature = null;
+          });
+          await _loadFrames(allowPageRecovery: false);
+          return;
+        }
+
+        final frames = rawItems
+            .whereType<Map>()
+            .map((item) => FrameModel.fromJson(Map<String, dynamic>.from(item)))
+            .toList();
+        final categories = rawCategories
+            .whereType<Object>()
+            .map((category) => category.toString().trim())
+            .where((category) => category.isNotEmpty)
+            .toSet()
+            .toList();
+
+        setState(() {
+          _frames = frames;
+          _frameCurrentPage = page;
+          _frameTotal = total;
+          _frameTotalPages = totalPages;
+          _frameCategories = ['All', ...categories];
+          _framesError = false;
+          _framesRefreshError = false;
+        });
         return;
       }
 
-      Map<String, dynamic> data = {};
-
-      try {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
-        }
-      } catch (_) {}
-
-      final message =
-          (data['message'] ?? data['error'])?.toString() ??
-          'Failed to load frame models.';
-
-      debugPrint('FRAME API ERROR: $message');
-
       setState(() {
-        _framesError = true;
-        _framesErrorMessage = message;
+        _framesError = _frames.isEmpty;
+        _framesRefreshError = _frames.isNotEmpty;
       });
-    } catch (e, st) {
-      debugPrint('FRAME API EXCEPTION: $e');
-
-      debugPrint('FRAME API STACK: $st');
-
-      if (!mounted) return;
-
+    } catch (_) {
+      if (!mounted || generation != _frameRequestGeneration) return;
       setState(() {
-        _framesError = true;
-        _framesErrorMessage = 'Unable to load frame models right now.';
+        _framesError = _frames.isEmpty;
+        _framesRefreshError = _frames.isNotEmpty;
       });
     } finally {
-      if (mounted) {
-        setState(() => _loadingFrames = false);
+      if (mounted && generation == _frameRequestGeneration) {
+        setState(() {
+          _loadingFrames = false;
+          _frameRequestSignature = null;
+        });
       }
     }
   }
@@ -2632,6 +2709,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       MaterialPageRoute(
         builder: (_) => AppointmentSchedulerScreen(
           patientId: _profile['patient_id'],
+          authenticatedPatientId: _profile['patient_id']?.toString(),
+          sessionService: _sessionService,
           onScheduled: _loadAppointments,
         ),
       ),
@@ -2730,6 +2809,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
+    _frameSearchDebounce?.cancel();
     _frameSearchController.dispose();
     super.dispose();
   }
@@ -3124,7 +3204,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _showFrameDetails(FrameModel frame) {
     final imageUrl = resolveFrameImageUrl(frame.imageUrl);
 
-    final inStock = frame.stockQuantity > 0;
+    final stockStatus = frame.stockQuantity <= 0
+        ? 'Out of Stock'
+        : frame.stockQuantity <= 2
+        ? 'Low Stock'
+        : 'Available';
 
     showModalBottomSheet(
       context: context,
@@ -3234,17 +3318,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           vertical: 6,
                         ),
                         decoration: BoxDecoration(
-                          color: inStock
-                              ? Colors.green.withValues(alpha: 0.12)
-                              : Colors.red.withValues(alpha: 0.12),
+                          color: frame.stockQuantity <= 0
+                              ? Colors.red.withValues(alpha: 0.12)
+                              : frame.stockQuantity <= 2
+                              ? Colors.orange.withValues(alpha: 0.14)
+                              : Colors.green.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(999),
                         ),
                         child: Text(
-                          inStock ? 'Available' : 'Out of stock',
+                          stockStatus,
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 12,
-                            color: inStock ? Colors.green : Colors.red,
+                            color: frame.stockQuantity <= 0
+                                ? Colors.red
+                                : frame.stockQuantity <= 2
+                                ? Colors.orange.shade800
+                                : Colors.green,
                           ),
                         ),
                       ),
@@ -3326,13 +3416,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               const Icon(Icons.error_outline, size: 48, color: Colors.grey),
               const SizedBox(height: 12),
-              Text(
-                _framesErrorMessage ?? 'Unable to load frame models.',
+              const Text(
+                'Unable to load frames',
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.black54),
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Please check your connection and try again.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.black54),
               ),
               const SizedBox(height: 12),
-              ElevatedButton(
+              OutlinedButton(
                 onPressed: _loadFrames,
                 child: const Text('Retry'),
               ),
@@ -3342,26 +3438,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     }
 
-    if (_frames.isEmpty) {
-      return RefreshIndicator(
-        onRefresh: _loadFrames,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          children: const [
-            SizedBox(height: 250),
-            Center(
-              child: Text(
-                'No frames available.',
-                style: TextStyle(color: Colors.black54),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final filteredFrames = _filteredFrames;
+    final filteredFrames = _frames;
     final categories = _frameCategories;
+    final hasActiveFilters =
+        _frameSearchQuery.trim().isNotEmpty ||
+        _selectedFrameCategory != 'All' ||
+        _frameAvailability != 'all';
 
     return Column(
       children: [
@@ -3374,22 +3456,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: TextField(
             controller: _frameSearchController,
             onChanged: (value) {
+              _frameSearchDebounce?.cancel();
+              ++_frameRequestGeneration;
+              _frameRequestSignature = null;
               setState(() {
                 _frameSearchQuery = value;
               });
+              _frameSearchDebounce = Timer(
+                const Duration(milliseconds: 300),
+                () {
+                  if (!mounted) return;
+                  setState(() => _frameCurrentPage = 1);
+                  _loadFrames();
+                },
+              );
             },
             decoration: InputDecoration(
-              hintText: 'Search frames, brands...',
+              hintText: 'Search by frame name or brand...',
               prefixIcon: const Icon(Icons.search, color: Color(0xFF0F76FF)),
               suffixIcon: _frameSearchQuery.isNotEmpty
                   ? IconButton(
                       icon: const Icon(Icons.clear),
                       onPressed: () {
                         _frameSearchController.clear();
-
+                        _frameSearchDebounce?.cancel();
+                        ++_frameRequestGeneration;
+                        _frameRequestSignature = null;
                         setState(() {
                           _frameSearchQuery = '';
+                          _frameCurrentPage = 1;
                         });
+                        _loadFrames();
                       },
                     )
                   : null,
@@ -3439,7 +3536,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onSelected: (_) {
                   setState(() {
                     _selectedFrameCategory = category;
+                    _frameCurrentPage = 1;
                   });
+                  _loadFrames();
                 },
                 selectedColor: const Color(0xFF0F76FF),
                 backgroundColor: Colors.white,
@@ -3460,6 +3559,100 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
 
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _frameSort,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Sort frames',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'newest', child: Text('Newest')),
+                    DropdownMenuItem(
+                      value: 'name-asc',
+                      child: Text('Name A-Z'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'name-desc',
+                      child: Text('Name Z-A'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'price-low',
+                      child: Text('Price: Low to High'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'price-high',
+                      child: Text('Price: High to Low'),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null || value == _frameSort) return;
+                    setState(() {
+                      _frameSort = value;
+                      _frameCurrentPage = 1;
+                    });
+                    _loadFrames();
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _frameAvailability,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Filter availability',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'all',
+                      child: Text('All Availability'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'available',
+                      child: Text('Available'),
+                    ),
+                    DropdownMenuItem(value: 'low', child: Text('Low Stock')),
+                    DropdownMenuItem(value: 'out', child: Text('Out of Stock')),
+                  ],
+                  onChanged: (value) {
+                    if (value == null || value == _frameAvailability) return;
+                    setState(() {
+                      _frameAvailability = value;
+                      _frameCurrentPage = 1;
+                    });
+                    _loadFrames();
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        if (_framesRefreshError)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Text(
+              'Could not refresh the catalog. Showing the last loaded results.',
+              style: TextStyle(color: Colors.black54),
+              textAlign: TextAlign.center,
+            ),
+          ),
+
         const SizedBox(height: 8),
 
         // =====================================================
@@ -3470,8 +3663,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Row(
             children: [
               Text(
-                '${filteredFrames.length} '
-                '${filteredFrames.length == 1 ? 'frame' : 'frames'}',
+                '${_frameTotal} ${_frameTotal == 1 ? 'frame' : 'frames'}',
                 style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -3480,15 +3672,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               const Spacer(),
               if (_frameSearchQuery.isNotEmpty ||
-                  _selectedFrameCategory != 'All')
+                  _selectedFrameCategory != 'All' ||
+                  _frameAvailability != 'all')
                 TextButton(
                   onPressed: () {
                     _frameSearchController.clear();
-
+                    _frameSearchDebounce?.cancel();
+                    ++_frameRequestGeneration;
+                    _frameRequestSignature = null;
                     setState(() {
                       _frameSearchQuery = '';
                       _selectedFrameCategory = 'All';
+                      _frameAvailability = 'all';
+                      _frameCurrentPage = 1;
                     });
+                    _loadFrames();
                   },
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -3523,20 +3721,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         color: Colors.grey.shade400,
                       ),
                       const SizedBox(height: 12),
-                      const Center(
+                      Center(
                         child: Text(
-                          'No frames found',
-                          style: TextStyle(
+                          hasActiveFilters
+                              ? 'No frames found'
+                              : 'No frames currently available',
+                          style: const TextStyle(
                             fontSize: 17,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
                       const SizedBox(height: 6),
-                      const Center(
+                      Center(
                         child: Text(
-                          'Try another search or category.',
-                          style: TextStyle(color: Colors.black54),
+                          hasActiveFilters
+                              ? 'Try changing your search or filter options.'
+                              : 'Please check back later.',
+                          style: const TextStyle(color: Colors.black54),
+                          textAlign: TextAlign.center,
                         ),
                       ),
                     ],
@@ -3557,7 +3760,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                       final imageUrl = resolveFrameImageUrl(frame.imageUrl);
 
-                      final inStock = frame.stockQuantity > 0;
+                      final stockStatus = frame.stockQuantity <= 0
+                          ? 'Out of Stock'
+                          : frame.stockQuantity <= 2
+                          ? 'Low Stock'
+                          : 'Available';
 
                       return InkWell(
                         onTap: () => _showFrameDetails(frame),
@@ -3702,11 +3909,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             vertical: 4,
                                           ),
                                           decoration: BoxDecoration(
-                                            color: inStock
-                                                ? Colors.green.withValues(
+                                            color: frame.stockQuantity <= 0
+                                                ? Colors.red.withValues(
                                                     alpha: 0.12,
                                                   )
-                                                : Colors.red.withValues(
+                                                : frame.stockQuantity <= 2
+                                                ? Colors.orange.withValues(
+                                                    alpha: 0.14,
+                                                  )
+                                                : Colors.green.withValues(
                                                     alpha: 0.12,
                                                   ),
                                             borderRadius: BorderRadius.circular(
@@ -3714,12 +3925,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             ),
                                           ),
                                           child: Text(
-                                            inStock ? 'Available' : 'Sold out',
+                                            stockStatus,
                                             style: TextStyle(
                                               fontSize: 10,
-                                              color: inStock
-                                                  ? Colors.green
-                                                  : Colors.red,
+                                              color: frame.stockQuantity <= 0
+                                                  ? Colors.red
+                                                  : frame.stockQuantity <= 2
+                                                  ? Colors.orange.shade800
+                                                  : Colors.green,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
@@ -3737,6 +3950,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
           ),
         ),
+        if (!_framesError && _frames.isNotEmpty && _frameTotalPages > 0)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                IconButton(
+                  tooltip: 'Previous',
+                  onPressed: !_loadingFrames && _frameCurrentPage > 1
+                      ? () {
+                          setState(() => _frameCurrentPage -= 1);
+                          _loadFrames();
+                        }
+                      : null,
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                Text(
+                  'Page $_frameCurrentPage of $_frameTotalPages',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black54,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Next',
+                  onPressed:
+                      !_loadingFrames && _frameCurrentPage < _frameTotalPages
+                      ? () {
+                          setState(() => _frameCurrentPage += 1);
+                          _loadFrames();
+                        }
+                      : null,
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -4010,6 +4260,47 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  String _appointmentSection(dynamic appointment) {
+    final dateTime = _appointmentDateTime(appointment);
+    if (dateTime == null) return 'Past Appointments';
+    final now = DateTime.now();
+    return dateTime.isAfter(now) || dateTime.isAtSameMomentAs(now)
+        ? 'Upcoming Appointments'
+        : 'Past Appointments';
+  }
+
+  List<Widget> _buildCurrentAppointmentPageWidgets() {
+    String? lastSection;
+    final widgets = <Widget>[];
+    for (final appointment in _currentAppointmentPageItems) {
+      final section = _appointmentSection(appointment);
+      if (section != lastSection) {
+        widgets.add(
+          Padding(
+            key: ValueKey('appointment-section-$section'),
+            padding: const EdgeInsets.fromLTRB(4, 8, 4, 10),
+            child: Text(
+              section,
+              style: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF173A70),
+              ),
+            ),
+          ),
+        );
+        lastSection = section;
+      }
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: _buildAppointmentCard(appointment as Map<String, dynamic>),
+        ),
+      );
+    }
+    return widgets;
+  }
+
   Widget _buildAppointmentsTab() {
     final pageCount = _appointmentPageCount;
 
@@ -4061,6 +4352,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           MaterialPageRoute(
                             builder: (_) => AppointmentSchedulerScreen(
                               patientId: _profile['patient_id'],
+                              authenticatedPatientId: _profile['patient_id']
+                                  ?.toString(),
+                              sessionService: _sessionService,
                               onScheduled: _loadAppointments,
                             ),
                           ),
@@ -4092,10 +4386,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             )
           else
-            ..._currentAppointmentPageItems.map(
-              (appointment) =>
-                  _buildAppointmentCard(appointment as Map<String, dynamic>),
-            ),
+            ..._buildCurrentAppointmentPageWidgets(),
           if (pageCount > 1)
             Padding(
               padding: const EdgeInsets.only(top: 4, bottom: 12),
@@ -4552,6 +4843,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _buildAppointmentsTab(),
       TransactionHistoryScreen(
         patientId: _profile['patient_id']?.toString(),
+        authenticatedPatientId: _profile['patient_id']?.toString(),
+        sessionService: _sessionService,
         showScaffold: false,
       ),
       _buildProfileTab(),

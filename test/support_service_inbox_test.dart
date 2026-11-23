@@ -32,7 +32,7 @@ void main() {
       http.Response(
         jsonEncode({
           'success': true,
-          'tickets': [
+          'items': [
             {
               'ticket_id': 42,
               'patient_id': 'patient-7',
@@ -43,6 +43,7 @@ void main() {
               'created_at': '2026-10-28T12:00:00Z',
             },
           ],
+          'pagination': {'page': 1, 'limit': 10, 'total': 1, 'totalPages': 1},
         }),
         200,
       ),
@@ -55,7 +56,9 @@ void main() {
     expect(find.text('Fictional demo tickets'), findsNothing);
     expect(find.byKey(const ValueKey('support-tickets-loading')), findsNothing);
     expect(requests, hasLength(1));
-    expect(requests.single.url.path, '/api/patients/support/my-tickets');
+    expect(requests.single.url.path, '/api/patients/support/my-tickets/page');
+    expect(requests.single.url.queryParameters['page'], '1');
+    expect(requests.single.url.queryParameters['limit'], '10');
     expect(requests.single.headers['Authorization'], 'Bearer test-token');
   });
 
@@ -64,7 +67,11 @@ void main() {
   ) async {
     final service = await _supportService(
       (_) async => http.Response(
-        jsonEncode({'success': true, 'tickets': <Object>[]}),
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+        }),
         200,
       ),
     );
@@ -88,7 +95,11 @@ void main() {
         throw http.ClientException('offline');
       }
       return http.Response(
-        jsonEncode({'success': true, 'tickets': <Object>[]}),
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+        }),
         200,
       );
     });
@@ -126,11 +137,162 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: SizedBox()));
 
     responseCompleter.complete(
-      http.Response(jsonEncode({'success': true, 'tickets': <Object>[]}), 200),
+      http.Response(
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+        }),
+        200,
+      ),
     );
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows page metadata and navigates with Previous and Next', (
+    tester,
+  ) async {
+    final service = await _supportService((request) async {
+      final page = int.parse(request.url.queryParameters['page'] ?? '1');
+      expect(request.url.path, '/api/patients/support/my-tickets/page');
+      expect(request.url.queryParameters['limit'], '10');
+      expect(request.headers['Authorization'], 'Bearer test-token');
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'items': [
+            {
+              'ticket_id': page == 1 ? 11 : 21,
+              'subject': page == 1 ? 'First page ticket' : 'Second page ticket',
+              'category': 'General Inquiry',
+              'status': 'open',
+              'created_at': '2026-11-10T10:00:00Z',
+            },
+          ],
+          'pagination': {
+            'page': page,
+            'limit': 10,
+            'total': 11,
+            'totalPages': 2,
+          },
+        }),
+        200,
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(home: SupportServiceScreen(supportCenterService: service)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Page 1 of 2'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('support-tickets-previous')),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('support-tickets-next')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('support-tickets-next')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Second page ticket'), findsOneWidget);
+    expect(find.text('Page 2 of 2'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('support-tickets-next')),
+          )
+          .onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('invalid pagination metadata shows recoverable ticket error', (
+    tester,
+  ) async {
+    final service = await _supportService(
+      (_) async => http.Response(
+        jsonEncode({
+          'success': true,
+          'items': <Object>[],
+          'pagination': {'page': 1, 'limit': 20, 'total': 0, 'totalPages': 0},
+        }),
+        200,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(home: SupportServiceScreen(supportCenterService: service)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not load tickets'), findsOneWidget);
+    expect(find.byKey(const ValueKey('support-tickets-retry')), findsOneWidget);
+  });
+
+  testWidgets('stale ticket page response cannot replace newer page results', (
+    tester,
+  ) async {
+    final pageOne = Completer<http.Response>();
+    var pageOneRequests = 0;
+    final service = await _supportService((request) async {
+      final page = int.parse(request.url.queryParameters['page'] ?? '1');
+      if (page == 1) {
+        pageOneRequests++;
+        return pageOne.future;
+      }
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'items': [
+            {
+              'ticket_id': 21,
+              'subject': 'New page two ticket',
+              'status': 'open',
+            },
+          ],
+          'pagination': {'page': 2, 'limit': 10, 'total': 11, 'totalPages': 2},
+        }),
+        200,
+      );
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(home: SupportServiceScreen(supportCenterService: service)),
+    );
+    await tester.pump();
+
+    pageOne.complete(
+      http.Response(
+        jsonEncode({
+          'success': true,
+          'items': [
+            {
+              'ticket_id': 11,
+              'subject': 'Old page one ticket',
+              'status': 'open',
+            },
+          ],
+          'pagination': {'page': 1, 'limit': 10, 'total': 11, 'totalPages': 2},
+        }),
+        200,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(pageOneRequests, 1);
   });
 }
 

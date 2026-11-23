@@ -107,6 +107,9 @@ class _SupportServiceScreenState extends State<SupportServiceScreen> {
   bool _isCancelling = false;
   String? _errorMessage;
   Future<void>? _ticketLoadFuture;
+  int _ticketCurrentPage = 1;
+  int _ticketTotalPages = 0;
+  int _ticketRequestGeneration = 0;
 
   @override
   void initState() {
@@ -139,27 +142,74 @@ class _SupportServiceScreenState extends State<SupportServiceScreen> {
     });
   }
 
-  Future<void> _fetchTickets() async {
+  Future<void> _fetchTickets({bool allowRecovery = true}) async {
+    final generation = ++_ticketRequestGeneration;
+    final requestedPage = _ticketCurrentPage;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      final tickets = await _supportCenterService.getMyTickets();
-      if (!mounted) return;
+      final result = await _supportCenterService.getMyTicketPage(
+        page: requestedPage,
+        limit: 10,
+      );
+      if (!mounted || generation != _ticketRequestGeneration) return;
+
+      if (allowRecovery &&
+          result.pagination.totalPages > 0 &&
+          requestedPage > result.pagination.totalPages) {
+        setState(() {
+          _ticketCurrentPage = result.pagination.totalPages;
+        });
+        await _fetchTickets(allowRecovery: false);
+        return;
+      }
+      if (allowRecovery &&
+          result.pagination.totalPages == 0 &&
+          requestedPage > 1) {
+        setState(() {
+          _ticketCurrentPage = 1;
+        });
+        await _fetchTickets(allowRecovery: false);
+        return;
+      }
+      if (!allowRecovery && result.pagination.totalPages == 0) {
+        setState(() {
+          _ticketCurrentPage = 1;
+          _tickets = const [];
+          _ticketTotalPages = 0;
+          _isLoading = false;
+        });
+        return;
+      }
+      if (!allowRecovery &&
+          result.pagination.totalPages > 0 &&
+          requestedPage > result.pagination.totalPages) {
+        setState(() {
+          _ticketCurrentPage = result.pagination.totalPages;
+          _tickets = _patientHistoryTickets(result.tickets);
+          _ticketTotalPages = result.pagination.totalPages;
+          _isLoading = false;
+        });
+        return;
+      }
+
       setState(() {
-        _tickets = _patientHistoryTickets(tickets);
+        _tickets = _patientHistoryTickets(result.tickets);
+        _ticketCurrentPage = result.pagination.page;
+        _ticketTotalPages = result.pagination.totalPages;
         _isLoading = false;
       });
     } on SupportServiceException catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _ticketRequestGeneration) return;
       setState(() {
         _errorMessage = error.message;
         _isLoading = false;
       });
     } catch (error, stackTrace) {
-      if (!mounted) return;
+      if (!mounted || generation != _ticketRequestGeneration) return;
       FlutterError.reportError(
         FlutterErrorDetails(
           exception: error,
@@ -441,6 +491,51 @@ class _SupportServiceScreenState extends State<SupportServiceScreen> {
                   onTap: () => _openConversation(context, ticket),
                   onCancel: () => _cancelTicket(context, ticket),
                   isCancelling: _isCancelling,
+                ),
+              ),
+            if (!_isLoading && _errorMessage == null && _ticketTotalPages > 0)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(0, 12, 0, 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    IconButton(
+                      key: const ValueKey('support-tickets-previous'),
+                      tooltip: 'Previous',
+                      onPressed: _ticketCurrentPage > 1
+                          ? () {
+                              setState(() {
+                                _ticketCurrentPage -= 1;
+                              });
+                              ++_ticketRequestGeneration;
+                              _loadTickets();
+                            }
+                          : null,
+                      icon: const Icon(Icons.chevron_left),
+                    ),
+                    Text(
+                      'Page $_ticketCurrentPage of $_ticketTotalPages',
+                      key: const ValueKey('support-tickets-page'),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    IconButton(
+                      key: const ValueKey('support-tickets-next'),
+                      tooltip: 'Next',
+                      onPressed: _ticketCurrentPage < _ticketTotalPages
+                          ? () {
+                              setState(() {
+                                _ticketCurrentPage += 1;
+                              });
+                              ++_ticketRequestGeneration;
+                              _loadTickets();
+                            }
+                          : null,
+                      icon: const Icon(Icons.chevron_right),
+                    ),
+                  ],
                 ),
               ),
             const SizedBox(height: 8),
@@ -769,8 +864,6 @@ class _NewTicketScreenState extends State<NewTicketScreen> {
     'General Inquiry',
     'Other',
   ];
-  static const List<String> _priorities = ['Low', 'Medium', 'High', 'Urgent'];
-
   final _formKey = GlobalKey<FormState>();
   final _subjectController = TextEditingController();
   final _messageController = TextEditingController();
@@ -779,7 +872,6 @@ class _NewTicketScreenState extends State<NewTicketScreen> {
   late final bool _ownsSupportCenterService =
       widget.supportCenterService == null;
   String? _category;
-  String _priority = 'Medium';
   bool _isSubmitting = false;
   String? _submissionError;
 
@@ -828,7 +920,6 @@ class _NewTicketScreenState extends State<NewTicketScreen> {
         category: _category!,
         subject: _subjectController.text.trim(),
         description: _messageController.text.trim(),
-        priority: _priority,
       );
       if (!mounted) return;
       Navigator.of(context).pop(ticket);
@@ -928,25 +1019,6 @@ class _NewTicketScreenState extends State<NewTicketScreen> {
                     : (value) => setState(() => _category = value),
                 validator: (value) =>
                     value == null ? 'Please choose a category' : null,
-              ),
-              const SizedBox(height: 14),
-              DropdownButtonFormField<String>(
-                initialValue: _priority,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'Priority'),
-                items: _priorities
-                    .map(
-                      (priority) => DropdownMenuItem(
-                        value: priority,
-                        child: Text(priority),
-                      ),
-                    )
-                    .toList(),
-                onChanged: _isSubmitting
-                    ? null
-                    : (value) {
-                        if (value != null) setState(() => _priority = value);
-                      },
               ),
               const SizedBox(height: 14),
               TextFormField(

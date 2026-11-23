@@ -48,6 +48,27 @@ class SupportMessageList {
   final bool? readOnly;
 }
 
+class SupportTicketPagination {
+  const SupportTicketPagination({
+    required this.page,
+    required this.limit,
+    required this.total,
+    required this.totalPages,
+  });
+
+  final int page;
+  final int limit;
+  final int total;
+  final int totalPages;
+}
+
+class SupportTicketPage {
+  const SupportTicketPage({required this.tickets, required this.pagination});
+
+  final List<SupportTicket> tickets;
+  final SupportTicketPagination pagination;
+}
+
 class SupportCenterService {
   SupportCenterService({
     PatientSessionService? sessionService,
@@ -67,16 +88,90 @@ class SupportCenterService {
 
   static const _basePath = '/api/patients/support';
 
-  Future<List<SupportTicket>> getMyTickets() async {
+  Future<SupportTicketPage> getMyTicketPage({
+    int page = 1,
+    int limit = 10,
+  }) async {
+    if (page < 1 || limit < 1) {
+      throw const SupportServiceException(
+        kind: SupportServiceFailureKind.requestRejected,
+        message: 'Invalid support ticket pagination request.',
+      );
+    }
+
     final response = await _getJsonMapOrList(
-      '$_basePath/my-tickets',
+      '$_basePath/my-tickets/page',
       cacheBust: true,
+      queryParameters: {'page': '$page', 'limit': '$limit'},
     );
     final collection = _requireCollectionResponse(response);
-    final rows = _collectionFromBody(collection, const ['tickets', 'data']);
-    return rows
-        .map((row) => _parseResponse(() => SupportTicket.fromJson(row)))
+    if (collection is! Map<String, dynamic>) {
+      throw _invalidResponse(
+        'The clinic service returned an invalid paginated ticket response.',
+      );
+    }
+
+    final rawItems = collection['items'];
+    final rawTickets = collection['tickets'];
+    final rawRows = rawItems is List<Object?> ? rawItems : rawTickets;
+    if (rawRows is! List<Object?>) {
+      throw _invalidResponse(
+        'The clinic service returned an invalid paginated ticket response.',
+      );
+    }
+
+    final pagination = collection['pagination'];
+    if (pagination is! Map<String, dynamic>) {
+      throw _invalidResponse(
+        'The clinic service returned an invalid ticket pagination response.',
+      );
+    }
+
+    final responsePage = pagination['page'];
+    final responseLimit = pagination['limit'];
+    final total = pagination['total'];
+    final totalPages = pagination['totalPages'];
+    if (responsePage is! int ||
+        responseLimit is! int ||
+        total is! int ||
+        totalPages is! int ||
+        responsePage < 1 ||
+        responseLimit != limit ||
+        total < 0 ||
+        totalPages < 0 ||
+        (totalPages == 0 && total != 0) ||
+        (responsePage != page && !((totalPages == 0) && page > 1))) {
+      throw _invalidResponse(
+        'The clinic service returned invalid ticket pagination metadata.',
+      );
+    }
+
+    final rows = rawRows
+        .map((value) {
+          if (value is! Map<String, dynamic>) {
+            throw _invalidResponse(
+              'The clinic service returned an invalid support ticket.',
+            );
+          }
+          return value;
+        })
         .toList(growable: false);
+    return SupportTicketPage(
+      tickets: rows
+          .map((row) => _parseResponse(() => SupportTicket.fromJson(row)))
+          .toList(growable: false),
+      pagination: SupportTicketPagination(
+        page: responsePage,
+        limit: responseLimit,
+        total: total,
+        totalPages: totalPages,
+      ),
+    );
+  }
+
+  Future<List<SupportTicket>> getMyTickets() async {
+    final page = await getMyTicketPage(page: 1, limit: 10);
+    return page.tickets;
   }
 
   Future<SupportMessageList> getMessages(String ticketId) async {
@@ -104,13 +199,11 @@ class SupportCenterService {
     required String category,
     required String subject,
     required String description,
-    required String priority,
   }) async {
     final body = await _postJson('$_basePath/tickets', {
       'category': category,
       'subject': subject,
       'description': description,
-      'priority': priority,
     });
     final response = _requireSuccessfulBody(body);
     final ticket = response['ticket'] ?? response['data'];
@@ -206,12 +299,20 @@ class SupportCenterService {
     return updatedCount.toInt();
   }
 
-  Future<Object> _getJsonMapOrList(String path, {bool cacheBust = false}) {
-    final query = cacheBust
-        ? '?_=${DateTime.now().millisecondsSinceEpoch}'
-        : '';
+  Future<Object> _getJsonMapOrList(
+    String path, {
+    bool cacheBust = false,
+    Map<String, String>? queryParameters,
+  }) {
+    final parameters = <String, String>{
+      ...?queryParameters,
+      if (cacheBust) '_': '${DateTime.now().millisecondsSinceEpoch}',
+    };
+    final uri = Uri.parse(
+      '$_baseUrl$path',
+    ).replace(queryParameters: parameters.isEmpty ? null : parameters);
     return _sendJson(
-      () => _client.get(Uri.parse('$_baseUrl$path$query'), headers: _headers()),
+      () => _client.get(uri, headers: _headers()),
       allowList: true,
     );
   }

@@ -47,6 +47,8 @@ void main() {
 
               final titleFinder = find.text(appointmentTitle);
               final badgeTextFinder = find.text('CONFIRMED');
+              expect(find.text('OCT'), findsOneWidget);
+              expect(find.text('22'), findsOneWidget);
               expect(titleFinder, findsOneWidget);
               expect(badgeTextFinder, findsOneWidget);
               expect(
@@ -137,8 +139,20 @@ void main() {
           if (request.url.path == '/api/patients/$patientId') {
             return http.Response('{}', 200);
           }
-          if (request.url.path == '/api/frames') {
-            return http.Response('[]', 200);
+          if (request.url.path == '/api/frames/page') {
+            return http.Response(
+              jsonEncode({
+                'items': [],
+                'categories': [],
+                'pagination': {
+                  'page': 1,
+                  'limit': 10,
+                  'total': 0,
+                  'totalPages': 0,
+                },
+              }),
+              200,
+            );
           }
           return http.Response('[]', 200);
         }),

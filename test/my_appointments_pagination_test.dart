@@ -9,34 +9,197 @@ import 'package:optcare_app/appointment_scheduler.dart';
 import 'package:optcare_app/main.dart';
 
 void main() {
-  testWidgets('sorts by newest date and time while preserving equal order', (
+  testWidgets('separates and sorts upcoming and past appointments', (
     tester,
   ) async {
+    final now = DateTime.now();
+    final futureLater = now
+        .add(const Duration(days: 5))
+        .toIso8601String()
+        .split('T')
+        .first;
+    final futureSoon = now
+        .add(const Duration(days: 2))
+        .toIso8601String()
+        .split('T')
+        .first;
+    final pastRecent = now
+        .subtract(const Duration(days: 2))
+        .toIso8601String()
+        .split('T')
+        .first;
+    final pastOlder = now
+        .subtract(const Duration(days: 5))
+        .toIso8601String()
+        .split('T')
+        .first;
     final appointments = [
-      _appointment('Old', '2026-10-20', '09:00'),
-      _appointment('Tie first', '2026-10-21', '10:00'),
-      _appointment('Invalid first', 'not-a-date', '10:00'),
-      _appointment('Newest', '2026-10-21', '11:00'),
-      _appointment('Tie second', '2026-10-21', '10:00'),
-      _appointment('Invalid second', '2026-10-22', ''),
+      _withCreatedAt(
+        _appointment('Past older', pastOlder, '10:00'),
+        now.subtract(const Duration(hours: 1)),
+      ),
+      _withCreatedAt(
+        _appointment('Upcoming later', futureLater, '09:00'),
+        now.subtract(const Duration(minutes: 1)),
+      ),
+      _withCreatedAt(
+        _appointment('Past recent', pastRecent, '16:00'),
+        now.subtract(const Duration(hours: 2)),
+      ),
+      _withCreatedAt(
+        _appointment('Upcoming soon 11 AM', futureSoon, '11:00'),
+        now.subtract(const Duration(minutes: 3)),
+      ),
+      _withCreatedAt(
+        _appointment('Upcoming soon 9 AM', futureSoon, '09:00'),
+        now.subtract(const Duration(minutes: 4)),
+      ),
     ];
 
     await _withDashboard(tester, (_) async {
-      final names = [
-        'Newest',
-        'Tie first',
-        'Tie second',
-        'Old',
-        'Invalid first',
-        'Invalid second',
+      expect(find.text('Upcoming Appointments'), findsOneWidget);
+      expect(find.text('Past Appointments'), findsOneWidget);
+
+      final positions = [
+        tester.getTopLeft(find.text('Upcoming later')).dy,
+        tester.getTopLeft(find.text('Upcoming soon 11 AM')).dy,
+        tester.getTopLeft(find.text('Upcoming soon 9 AM')).dy,
+        tester.getTopLeft(find.text('Past recent')).dy,
+        tester.getTopLeft(find.text('Past older')).dy,
       ];
-      final positions = <double>[];
-      for (final name in names) {
-        await tester.ensureVisible(find.text(name));
-        positions.add(tester.getTopLeft(find.text(name)).dy);
-      }
       expect(positions, orderedEquals(positions.toList()..sort()));
     }, (_) async => _jsonResponse(200, appointments));
+  });
+
+  testWidgets('sorts by scheduled date and time instead of created_at', (
+    tester,
+  ) async {
+    var november30Evening = _appointment(
+      'Nov 30 Evening',
+      '2026-11-30',
+      '16:00',
+    );
+    november30Evening = _withCreatedAt(november30Evening, DateTime(2026, 1, 1));
+    var november30Cancelled = _appointment(
+      'Nov 30 Cancelled',
+      '2026-11-30',
+      '12:00',
+    );
+    november30Cancelled = {
+      ..._withCreatedAt(november30Cancelled, DateTime(2026, 12, 1)),
+      'appointment_status': 'Cancelled',
+    };
+    var november30Morning = _appointment(
+      'Nov 30 Morning',
+      '2026-11-30',
+      '09:00',
+    );
+    november30Morning = _withCreatedAt(
+      november30Morning,
+      DateTime(2026, 10, 1),
+    );
+    final november25 = _withCreatedAt(
+      _appointment('Nov 25', '2026-11-25', '10:00'),
+      DateTime(2026, 11, 30),
+    );
+    final november24 = _withCreatedAt(
+      _appointment('Nov 24', '2026-11-24', '10:00'),
+      DateTime(2027, 1, 1),
+    );
+
+    await _withDashboard(
+      tester,
+      (_) async {
+        final positions = [
+          tester.getTopLeft(find.text('Nov 30 Evening')).dy,
+          tester.getTopLeft(find.text('Nov 30 Cancelled')).dy,
+          tester.getTopLeft(find.text('Nov 30 Morning')).dy,
+          tester.getTopLeft(find.text('Nov 25')).dy,
+          tester.getTopLeft(find.text('Nov 24')).dy,
+        ];
+        expect(positions, orderedEquals(positions.toList()..sort()));
+        expect(find.text('CANCELLED'), findsOneWidget);
+      },
+      (_) async => _jsonResponse(200, [
+        november24,
+        november30Morning,
+        november25,
+        november30Evening,
+        november30Cancelled,
+      ]),
+    );
+  });
+
+  testWidgets('six appointments appear together on page one', (tester) async {
+    await _withDashboard(tester, (_) async {
+      expect(find.text('Page 1 of 1'), findsNothing);
+      for (var index = 1; index <= 6; index++) {
+        expect(find.text('Appointment $index'), findsOneWidget);
+      }
+    }, (_) async => _jsonResponse(200, _appointments(6)));
+  });
+
+  testWidgets('invalid appointment dates are placed safely after valid dates', (
+    tester,
+  ) async {
+    await _withDashboard(
+      tester,
+      (_) async {
+        expect(find.text('Valid Later'), findsOneWidget);
+        expect(find.text('Invalid Date'), findsOneWidget);
+        final validPosition = tester.getTopLeft(find.text('Valid Later')).dy;
+        final invalidPosition = tester.getTopLeft(find.text('Invalid Date')).dy;
+        expect(validPosition, lessThan(invalidPosition));
+      },
+      (_) async => _jsonResponse(200, [
+        _appointment('Invalid Date', 'invalid', '10:00'),
+        _appointment('Valid Later', '2026-11-30', '16:00'),
+      ]),
+    );
+  });
+
+  testWidgets('deduplicates repeated appointment IDs after refresh', (
+    tester,
+  ) async {
+    final duplicate = _appointment('Unique appointment', '2026-10-22', '11:00');
+    duplicate['appointment_id'] = 'dup-1';
+    await _withDashboard(
+      tester,
+      (_) async {
+        expect(find.text('Unique appointment'), findsOneWidget);
+      },
+      (_) async => _jsonResponse(200, [
+        duplicate,
+        {...duplicate},
+      ]),
+    );
+  });
+
+  testWidgets('missing creation timestamps sort by scheduled date', (
+    tester,
+  ) async {
+    final futureSoon = DateTime.now()
+        .add(const Duration(days: 1))
+        .toIso8601String()
+        .split('T')
+        .first;
+    final futureLater = DateTime.now()
+        .add(const Duration(days: 5))
+        .toIso8601String()
+        .split('T')
+        .first;
+    await _withDashboard(
+      tester,
+      (_) async {
+        final first = tester.getTopLeft(find.text('First returned')).dy;
+        final second = tester.getTopLeft(find.text('Second returned')).dy;
+        expect(second, lessThan(first));
+      },
+      (_) async => _jsonResponse(200, [
+        _appointment('First returned', futureSoon, '09:00'),
+        _appointment('Second returned', futureLater, '09:00'),
+      ]),
+    );
   });
 
   testWidgets(
@@ -46,10 +209,10 @@ void main() {
 
       await _withDashboard(tester, (_) async {
         expect(find.text('Page 1 of 3'), findsOneWidget);
-        for (var index = 23; index >= 14; index--) {
+        for (var index = 1; index <= 10; index++) {
           expect(find.text('Appointment $index'), findsOneWidget);
         }
-        expect(find.text('Appointment 13'), findsNothing);
+        expect(find.text('Appointment 11'), findsNothing);
 
         await tester.ensureVisible(
           find.byKey(const ValueKey('appointments-next-page')),
@@ -58,11 +221,11 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Page 2 of 3'), findsOneWidget);
-        for (var index = 13; index >= 4; index--) {
+        for (var index = 11; index <= 20; index++) {
           expect(find.text('Appointment $index'), findsOneWidget);
         }
-        expect(find.text('Appointment 23'), findsNothing);
-        expect(find.text('Appointment 3'), findsNothing);
+        expect(find.text('Appointment 1'), findsNothing);
+        expect(find.text('Appointment 21'), findsNothing);
       }, (_) async => _jsonResponse(200, appointments));
     },
   );
@@ -80,7 +243,7 @@ void main() {
       }
 
       expect(find.text('Page 3 of 3'), findsOneWidget);
-      for (final index in [3, 2, 1]) {
+      for (final index in [21, 22, 23]) {
         expect(find.text('Appointment $index'), findsOneWidget);
       }
       expect(find.text('Appointment 4'), findsNothing);
@@ -93,6 +256,28 @@ void main() {
         isNull,
       );
     }, (_) async => _jsonResponse(200, _appointments(23)));
+  });
+
+  testWidgets('cancelled future appointment remains upcoming', (tester) async {
+    final futureDate = DateTime.now()
+        .add(const Duration(days: 3))
+        .toIso8601String()
+        .split('T')
+        .first;
+    await _withDashboard(
+      tester,
+      (_) async {
+        expect(find.text('Upcoming Appointments'), findsOneWidget);
+        expect(find.text('Cancelled Future'), findsOneWidget);
+        expect(find.text('CANCELLED'), findsOneWidget);
+      },
+      (_) async => _jsonResponse(200, [
+        {
+          ..._appointment('Cancelled Future', futureDate, '10:00'),
+          'appointment_status': 'Cancelled',
+        },
+      ]),
+    );
   });
 
   testWidgets('pagination controls navigate and disable at page boundaries', (
@@ -238,7 +423,6 @@ void main() {
     (tester) async {
       var cancelled = false;
       var appointmentListFetches = 0;
-      var availabilityFetches = 0;
       http.Request? cancellationRequest;
       final appointment = _futureAppointment('42');
       await _withDashboard(
@@ -268,7 +452,6 @@ void main() {
             'patient_id': 'patient-test',
           });
           expect(appointmentListFetches, 2);
-          expect(availabilityFetches, 1);
           expect(find.text('CANCELLED'), findsOneWidget);
           expect(find.text('Appointment cancelled.'), findsOneWidget);
           expect(
@@ -295,13 +478,6 @@ void main() {
               'appointment_status': 'Cancelled',
               'booking_slot_released': true,
             });
-          }
-          if (request.method == 'GET' &&
-              request.url.path == '/api/appointments') {
-            availabilityFetches++;
-            return _jsonResponse(200, [
-              {...appointment, 'appointment_status': 'Cancelled'},
-            ]);
           }
           return _defaultDashboardResponse(request);
         },
@@ -403,19 +579,12 @@ void main() {
       var cancelled = false;
       final appointments = List.generate(
         11,
-        (index) => _futureAppointment('$index', daysFromNow: index + 1),
+        (index) => _futureAppointment('$index', daysFromNow: 11 - index),
       );
       await _withDashboard(
         tester,
         (_) async {
           expect(find.text('Page 1 of 2'), findsOneWidget);
-          await tester.ensureVisible(
-            find.byKey(const ValueKey('appointments-next-page')),
-          );
-          await tester.tap(
-            find.byKey(const ValueKey('appointments-next-page')),
-          );
-          await tester.pumpAndSettle();
           expect(find.text('Appointment 0'), findsOneWidget);
 
           final action = find.byKey(const ValueKey('appointment-cancel-0'));
@@ -428,10 +597,10 @@ void main() {
           await tester.pumpAndSettle();
 
           expect(find.text('Page 1 of 2'), findsOneWidget);
-          for (var index = 10; index >= 1; index--) {
+          for (var index = 1; index <= 9; index++) {
             expect(find.text('Appointment $index'), findsOneWidget);
           }
-          expect(find.text('Appointment 0'), findsNothing);
+          expect(find.text('CANCELLED'), findsOneWidget);
         },
         (_) async => _jsonResponse(
           200,
@@ -507,94 +676,92 @@ void main() {
     );
   });
 
-  testWidgets('successful scheduling refreshes and returns to page one', (
-    tester,
-  ) async {
-    var scheduled = false;
-    var appointmentFetchCount = 0;
-    await _withDashboard(
-      tester,
-      (_) async {
-        await tester.ensureVisible(
-          find.byKey(const ValueKey('appointments-next-page')),
-        );
-        await tester.tap(find.byKey(const ValueKey('appointments-next-page')));
-        await tester.pumpAndSettle();
-        expect(find.text('Page 2 of 2'), findsOneWidget);
-
-        await tester.ensureVisible(find.text('Schedule New Appointment'));
-        await tester.tap(find.text('Schedule New Appointment'));
-        await tester.pumpAndSettle();
-        final calendar = tester.widget<CalendarDatePicker>(
-          find.byType(CalendarDatePicker),
-        );
-        final selectedDate = nextClinicOpenDate(
-          DateTime.now().add(const Duration(days: 1)),
-        );
-        calendar.onDateChanged(selectedDate);
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 100));
-
-        final firstSlot = find.text('8:00 AM');
-        await tester.ensureVisible(firstSlot);
-        await tester.tap(firstSlot);
-        await tester.pump();
-        final visitType = find.byType(DropdownButtonFormField<String>);
-        await tester.ensureVisible(visitType);
-        await tester.tap(visitType);
-        await tester.pump();
-        await tester.tap(find.text('Eye Examination').last);
-        await tester.pump();
-        await tester.ensureVisible(find.text('Confirm Appointment'));
-        await tester.tap(find.text('Confirm Appointment'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 100));
-        await tester.pumpAndSettle();
-
-        expect(scheduled, isTrue);
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-        expect(find.text('Page 1 of 2'), findsOneWidget);
-        await tester.ensureVisible(find.text('Eye Examination'));
-        expect(find.text('Eye Examination'), findsOneWidget);
-      },
-      (request) async {
-        if (request.url.path == '/api/appointments/patient/patient-test') {
-          appointmentFetchCount++;
-          return _jsonResponse(
-            200,
-            scheduled
-                ? [
-                    ..._appointments(11, year: 2020),
-                    _appointment(
-                      'Eye Examination',
-                      DateTime.now().toIso8601String().split('T').first,
-                      '23:59',
-                    ),
-                  ]
-                : _appointments(11, year: 2020),
+  testWidgets(
+    'secure availability block prevents scheduling and exposes no POST',
+    (tester) async {
+      var scheduled = false;
+      var appointmentFetchCount = 0;
+      await _withDashboard(
+        tester,
+        (_) async {
+          await tester.ensureVisible(
+            find.byKey(const ValueKey('appointments-next-page')),
           );
-        }
-        return _defaultDashboardResponse(request);
-      },
-      otherRequestHandler: (request) async {
-        if (request.url.path == '/api/appointments' &&
-            request.method == 'GET') {
-          return _jsonResponse(200, []);
-        }
-        if (request.url.path == '/api/appointments' &&
-            request.method == 'POST') {
-          scheduled = true;
-          return _jsonResponse(201, {'success': true});
-        }
-        if (request.url.path == '/api/clinic-closures') {
-          return _jsonResponse(200, []);
-        }
-        return _defaultDashboardResponse(request);
-      },
-    );
-    expect(appointmentFetchCount, greaterThanOrEqualTo(2));
-  });
+          await tester.tap(
+            find.byKey(const ValueKey('appointments-next-page')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Page 2 of 2'), findsOneWidget);
+
+          await tester.ensureVisible(find.text('Schedule New Appointment'));
+          await tester.tap(find.text('Schedule New Appointment'));
+          await tester.pumpAndSettle();
+          final calendar = tester.widget<CalendarDatePicker>(
+            find.byType(CalendarDatePicker),
+          );
+          final selectedDate = nextClinicOpenDate(
+            DateTime.now().add(const Duration(days: 1)),
+          );
+          calendar.onDateChanged(selectedDate);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(
+            find.text(
+              'Secure patient appointment availability is unavailable. '
+              'Booking is temporarily disabled until secure backend availability is provided.',
+            ),
+            findsOneWidget,
+          );
+          expect(find.text('8:00 AM'), findsNothing);
+          expect(scheduled, isFalse);
+        },
+        (request) async {
+          if (request.url.path == '/api/appointments/patient/patient-test') {
+            appointmentFetchCount++;
+            return _jsonResponse(
+              200,
+              scheduled
+                  ? [
+                      ..._appointments(11, year: 2020),
+                      _appointment(
+                        'Eye Examination',
+                        DateTime.now().toIso8601String().split('T').first,
+                        '23:59',
+                      ),
+                    ]
+                  : _appointments(11, year: 2020),
+            );
+          }
+          return _defaultDashboardResponse(request);
+        },
+        otherRequestHandler: (request) async {
+          if (request.url.path == '/api/appointments/services') {
+            return _jsonResponse(200, [
+              {
+                'name': 'Eye Examination',
+                'duration_minutes': 60,
+                'legacy_names': ['Eye Examination'],
+              },
+            ]);
+          }
+          if (request.url.path == '/api/appointments' &&
+              request.method == 'GET') {
+            return _jsonResponse(200, []);
+          }
+          if (request.url.path == '/api/appointments' &&
+              request.method == 'POST') {
+            scheduled = true;
+            return _jsonResponse(201, {'success': true});
+          }
+          if (request.url.path == '/api/clinic-closures') {
+            return _jsonResponse(200, []);
+          }
+          return _defaultDashboardResponse(request);
+        },
+      );
+      expect(appointmentFetchCount, greaterThanOrEqualTo(1));
+    },
+  );
 }
 
 Future<void> _withDashboard(
@@ -657,19 +824,34 @@ Future<http.Response> _defaultDashboardResponse(http.Request request) async {
   if (request.url.path == '/api/patients/patient-test') {
     return _jsonResponse(200, {});
   }
-  if (request.url.path == '/api/frames') return _jsonResponse(200, []);
+  if (request.url.path == '/api/frames/page') {
+    return _jsonResponse(200, {
+      'items': [],
+      'categories': [],
+      'pagination': {'page': 1, 'limit': 10, 'total': 0, 'totalPages': 0},
+    });
+  }
   return _jsonResponse(200, []);
 }
 
 List<Map<String, dynamic>> _appointments(int count, {int year = 2026}) =>
-    List.generate(
-      count,
-      (index) => _appointment(
+    List.generate(count, (index) {
+      final scheduledDay = count - index;
+      final appointment = _appointment(
         'Appointment ${index + 1}',
-        DateTime(year, 1, index + 1).toIso8601String().split('T').first,
+        DateTime(year, 12, scheduledDay).toIso8601String().split('T').first,
         '10:00',
-      ),
-    );
+      );
+      appointment['created_at'] = DateTime.now()
+          .subtract(Duration(days: count - index))
+          .toIso8601String();
+      return appointment;
+    });
+
+Map<String, dynamic> _withCreatedAt(
+  Map<String, dynamic> appointment,
+  DateTime createdAt,
+) => {...appointment, 'created_at': createdAt.toIso8601String()};
 
 Map<String, dynamic> _futureAppointment(
   String id, {

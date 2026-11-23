@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -7,8 +8,519 @@ import 'package:http/testing.dart';
 import 'package:optcare_app/appointment_scheduler.dart';
 import 'package:optcare_app/constants.dart';
 import 'package:optcare_app/main.dart';
+import 'package:optcare_app/services/patient_session_service.dart';
 
 void main() {
+  testWidgets(
+    'service catalog loads and confirmation cannot open without secure availability',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var globalGetCount = 0;
+      var bookingPostCount = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments/services') {
+          return _jsonResponse(200, [
+            {
+              'name': 'Comprehensive Eye Check Up',
+              'duration_minutes': 60,
+              'legacy_names': ['Eye Examination'],
+            },
+            {
+              'name': 'Follow-up Checkup',
+              'duration_minutes': 30,
+              'legacy_names': ['Follow-up'],
+            },
+          ]);
+        }
+        if (request.url.path == '/api/appointments') {
+          if (request.method == 'GET') globalGetCount++;
+          if (request.method == 'POST') bookingPostCount++;
+        }
+        return _jsonResponse(500, {'error': 'Unsafe endpoint'});
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => DateTime(2026, 10, 5, 7),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.textContaining('Comprehensive Eye Check Up'), findsNothing);
+      final dropdown = find.byType(DropdownButtonFormField<String>);
+      await tester.ensureVisible(dropdown);
+      await tester.tap(dropdown);
+      await tester.pumpAndSettle();
+      expect(find.text('Comprehensive Eye Check Up — 60 min'), findsOneWidget);
+      expect(find.text('Follow-up Checkup — 30 min'), findsOneWidget);
+      expect(globalGetCount, 0);
+      expect(bookingPostCount, 0);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
+
+  testWidgets('successful booking sends authenticated payload and refreshes', (
+    tester,
+  ) async {
+    http.Request? bookingRequest;
+    var availabilityRequests = 0;
+    var scheduledRefreshes = 0;
+    final session = await _authenticatedAppointmentSession();
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/appointments/services') {
+        return _jsonResponse(200, [
+          {
+            'name': 'Comprehensive Eye Check Up',
+            'duration_minutes': 60,
+            'legacy_names': ['Eye Examination'],
+          },
+        ]);
+      }
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/patients/auth/me') {
+        return _jsonResponse(200, {
+          'success': true,
+          'patient': {'patient_id': 'synthetic-patient'},
+        });
+      }
+      if (request.url.path == '/api/appointments/patient/synthetic-patient') {
+        availabilityRequests++;
+        return _jsonResponse(200, []);
+      }
+      if (request.method == 'POST' && request.url.path == '/api/appointments') {
+        bookingRequest = request;
+        return _jsonResponse(201, {'success': true});
+      }
+      return _jsonResponse(500, {'error': 'Unexpected request'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          authenticatedPatientId: 'synthetic-patient',
+          sessionService: session,
+          onScheduled: () async {
+            scheduledRefreshes++;
+          },
+          client: client,
+          nowProvider: () => DateTime(2026, 10, 5, 7),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 150));
+
+    final dropdown = find.byType(DropdownButtonFormField<String>);
+    await tester.ensureVisible(dropdown);
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Comprehensive Eye Check Up — 60 min').last);
+    await tester.pumpAndSettle();
+
+    final calendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    calendar.onDateChanged(DateTime(2026, 10, 6));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    await tester.ensureVisible(find.text('8:00 AM'));
+    await tester.tap(find.text('8:00 AM'));
+    await tester.pump();
+
+    await tester.ensureVisible(find.text('Confirm Appointment'));
+    await tester.tap(find.text('Confirm Appointment'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Confirm appointment request?'), findsOneWidget);
+    await tester.tap(find.text('Book appointment'));
+    await tester.pumpAndSettle();
+
+    expect(bookingRequest, isNotNull);
+    expect(bookingRequest!.headers['authorization'], 'Bearer test-token');
+    expect(bookingRequest!.method, 'POST');
+    expect(bookingRequest!.url.path, '/api/appointments');
+    expect(jsonDecode(bookingRequest!.body), {
+      'patient_id': 'synthetic-patient',
+      'appointment_date': '2026-10-06',
+      'appointment_time': '08:00:00',
+      'purpose_of_visit': 'Comprehensive Eye Check Up',
+      'appointment_status': 'Requested',
+      'appointment_source': 'mobile',
+    });
+    expect(scheduledRefreshes, 1);
+    expect(availabilityRequests, greaterThanOrEqualTo(1));
+    expect(find.text('Appointment request sent successfully!'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets(
+    'duplicate booking submission is prevented while POST is pending',
+    (tester) async {
+      final postCompleter = Completer<http.Response>();
+      var bookingPosts = 0;
+      final session = await _authenticatedAppointmentSession();
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/appointments/services') {
+          return _jsonResponse(200, [
+            {
+              'name': 'Comprehensive Eye Check Up',
+              'duration_minutes': 60,
+              'legacy_names': ['Eye Examination'],
+            },
+          ]);
+        }
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/patients/auth/me') {
+          return _jsonResponse(200, {
+            'success': true,
+            'patient': {'patient_id': 'synthetic-patient'},
+          });
+        }
+        if (request.url.path == '/api/appointments/patient/synthetic-patient') {
+          return _jsonResponse(200, []);
+        }
+        if (request.method == 'POST' &&
+            request.url.path == '/api/appointments') {
+          bookingPosts++;
+          return postCompleter.future;
+        }
+        return _jsonResponse(500, {'error': 'Unexpected request'});
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            authenticatedPatientId: 'synthetic-patient',
+            sessionService: session,
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => DateTime(2026, 10, 5, 7),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 150));
+      final dropdown = find.byType(DropdownButtonFormField<String>);
+      await tester.ensureVisible(dropdown);
+      await tester.tap(dropdown);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Eye Check Up — 60 min').last);
+      await tester.pumpAndSettle();
+      final calendar = tester.widget<CalendarDatePicker>(
+        find.byType(CalendarDatePicker),
+      );
+      calendar.onDateChanged(DateTime(2026, 10, 6));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
+      await tester.ensureVisible(find.text('8:00 AM'));
+      await tester.tap(find.text('8:00 AM'));
+      await tester.pump();
+      await tester.ensureVisible(find.text('Confirm Appointment'));
+      await tester.tap(find.text('Confirm Appointment'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Book appointment'));
+      await tester.pump();
+
+      expect(bookingPosts, 1);
+      expect(find.text('Booking...'), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(bookingPosts, 1);
+
+      postCompleter.complete(_jsonResponse(201, {'success': true}));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Appointment request sent successfully!'),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
+
+  testWidgets('409 booking conflict refreshes availability and clears time', (
+    tester,
+  ) async {
+    var bookingPosts = 0;
+    var availabilityRequests = 0;
+    final session = await _authenticatedAppointmentSession();
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/appointments/services') {
+        return _jsonResponse(200, [
+          {
+            'name': 'Comprehensive Eye Check Up',
+            'duration_minutes': 60,
+            'legacy_names': ['Eye Examination'],
+          },
+        ]);
+      }
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/patients/auth/me') {
+        return _jsonResponse(200, {
+          'success': true,
+          'patient': {'patient_id': 'synthetic-patient'},
+        });
+      }
+      if (request.url.path == '/api/appointments/patient/synthetic-patient') {
+        availabilityRequests++;
+        return _jsonResponse(200, []);
+      }
+      if (request.method == 'POST' && request.url.path == '/api/appointments') {
+        bookingPosts++;
+        return _jsonResponse(409, {'error': 'The slot was taken.'});
+      }
+      return _jsonResponse(500, {'error': 'Unexpected request'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          authenticatedPatientId: 'synthetic-patient',
+          sessionService: session,
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => DateTime(2026, 10, 5, 7),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 150));
+
+    final dropdown = find.byType(DropdownButtonFormField<String>);
+    await tester.ensureVisible(dropdown);
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Comprehensive Eye Check Up — 60 min').last);
+    await tester.pumpAndSettle();
+
+    final calendar = tester.widget<CalendarDatePicker>(
+      find.byType(CalendarDatePicker),
+    );
+    calendar.onDateChanged(DateTime(2026, 10, 6));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.ensureVisible(find.text('8:00 AM'));
+    await tester.tap(find.text('8:00 AM'));
+    await tester.pump();
+
+    await tester.ensureVisible(find.text('Confirm Appointment'));
+    await tester.tap(find.text('Confirm Appointment'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Book appointment'));
+    await tester.pumpAndSettle();
+
+    expect(bookingPosts, 1);
+    expect(availabilityRequests, greaterThanOrEqualTo(2));
+    expect(find.text('The slot was taken.'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+
+  testWidgets(
+    'authenticated patient availability request uses bearer and matching patient ID',
+    (tester) async {
+      http.Request? availabilityRequest;
+      var bookingPostCount = 0;
+      final session = await _authenticatedAppointmentSession();
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/appointments/services') {
+          return _jsonResponse(200, [
+            {
+              'name': 'Comprehensive Eye Check Up',
+              'duration_minutes': 60,
+              'legacy_names': ['Eye Examination'],
+            },
+          ]);
+        }
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments/patient/synthetic-patient') {
+          availabilityRequest = request;
+          return _jsonResponse(200, [
+            {
+              'appointment_date': '2026-10-06',
+              'appointment_time': '09:00:00',
+              'purpose_of_visit': 'Eye Examination',
+              'appointment_status': 'Confirmed',
+            },
+          ]);
+        }
+        if (request.method == 'POST' &&
+            request.url.path == '/api/appointments') {
+          bookingPostCount++;
+        }
+        return _jsonResponse(500, {'error': 'Unexpected request'});
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            authenticatedPatientId: 'synthetic-patient',
+            sessionService: session,
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => DateTime(2026, 10, 5, 7),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(availabilityRequest, isNotNull);
+      expect(availabilityRequest!.method, 'GET');
+      expect(
+        availabilityRequest!.headers['authorization'],
+        'Bearer test-token',
+      );
+      expect(bookingPostCount, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
+
+  testWidgets('expired availability session shows sign-in retry blocker', (
+    tester,
+  ) async {
+    final session = await _authenticatedAppointmentSession();
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/appointments/services') {
+        return _jsonResponse(200, [
+          {
+            'name': 'Eye Examination',
+            'duration_minutes': 60,
+            'legacy_names': ['Eye Examination'],
+          },
+        ]);
+      }
+      if (request.url.path == '/api/clinic-closures') {
+        return _jsonResponse(200, []);
+      }
+      if (request.url.path == '/api/appointments/patient/synthetic-patient') {
+        return _jsonResponse(401, {'message': 'Unauthorized'});
+      }
+      return _jsonResponse(500, {'error': 'Unexpected request'});
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppointmentSchedulerScreen(
+          patientId: 'synthetic-patient',
+          authenticatedPatientId: 'synthetic-patient',
+          sessionService: session,
+          onScheduled: () async {},
+          client: client,
+          nowProvider: () => DateTime(2026, 10, 5, 7),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(
+      find.textContaining('Your sign-in session is no longer valid'),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    client.close();
+  });
+  test(
+    'appointment service catalog parses names durations and legacy names',
+    () {
+      final services = parseAppointmentServices([
+        {
+          'name': 'Comprehensive Eye Check Up',
+          'duration_minutes': 60,
+          'legacy_names': ['Eye Examination'],
+        },
+      ]);
+      expect(services, hasLength(1));
+      expect(services.single.name, 'Comprehensive Eye Check Up');
+      expect(services.single.durationMinutes, 60);
+      expect(services.single.legacyNames, ['Eye Examination']);
+    },
+  );
+
+  test('appointment service catalog rejects invalid durations', () {
+    expect(
+      () => parseAppointmentServices([
+        {
+          'name': 'Invalid Service',
+          'duration_minutes': 0,
+          'legacy_names': <Object>[],
+        },
+      ]),
+      throwsFormatException,
+    );
+    expect(
+      () => parseAppointmentServices([
+        {
+          'name': 'Invalid Service',
+          'duration_minutes': 30.5,
+          'legacy_names': <Object>[],
+        },
+      ]),
+      throwsFormatException,
+    );
+  });
+
+  test('partial closure overlap uses closure boundary semantics', () {
+    expect(
+      appointmentIntervalOverlaps(
+        slotStart: const TimeOfDay(hour: 9, minute: 0),
+        slotDurationMinutes: 60,
+        intervalStart: const TimeOfDay(hour: 10, minute: 0),
+        intervalDurationMinutes: 60,
+      ),
+      isTrue,
+    );
+    expect(
+      appointmentIntervalOverlaps(
+        slotStart: const TimeOfDay(hour: 9, minute: 30),
+        slotDurationMinutes: 60,
+        intervalStart: const TimeOfDay(hour: 10, minute: 0),
+        intervalDurationMinutes: 60,
+      ),
+      isTrue,
+    );
+  });
+
+  test('appointment end time must not exceed 6 PM', () {
+    expect(
+      appointmentSlotFitsClinicHours(const TimeOfDay(hour: 17, minute: 30), 30),
+      isTrue,
+    );
+    expect(
+      appointmentSlotFitsClinicHours(const TimeOfDay(hour: 17, minute: 30), 60),
+      isFalse,
+    );
+  });
   test('clinic clock converts UTC to Philippine local time', () {
     expect(
       appointmentClinicLocalNow(utcNow: DateTime.utc(2026, 10, 21, 13, 52)),
@@ -44,6 +556,21 @@ void main() {
       isDateSelectableForBooking(DateTime(2026, 10, 11), {}, now: now),
       isFalse,
     );
+  });
+
+  test('partial closure records preserve date and time intervals', () {
+    final partial = parsePartialClinicClosures([
+      {
+        'start_date': '2026-10-06',
+        'end_date': '2026-10-06',
+        'start_time': '12:00',
+        'end_time': '14:00',
+      },
+    ]);
+    final closures = partial[DateTime(2026, 10, 6)]!;
+    expect(closures, hasLength(1));
+    expect(closures.single.start, const TimeOfDay(hour: 12, minute: 0));
+    expect(closures.single.end, const TimeOfDay(hour: 14, minute: 0));
   });
 
   test('clinic closures disable dates and inclusive range endpoints', () {
@@ -106,6 +633,7 @@ void main() {
         ' CANCELED ',
         'Rejected',
         ' DECLINED ',
+        'Completed',
       ]) {
         expect(isAppointmentStatusBlocking(status), isFalse);
       }
@@ -588,7 +1116,7 @@ void main() {
       calendar.selectableDayPredicate!(
         nextClinicOpenDate(closedDate.add(const Duration(days: 1))),
       ),
-      isTrue,
+      isFalse,
     );
 
     calendar.onDisplayedMonthChanged?.call(closedDate);
@@ -613,10 +1141,18 @@ void main() {
     'appointment terms link opens all five terms and closing preserves selections',
     (tester) async {
       final now = DateTime(2026, 10, 5, 7);
-      final selectedDate = DateTime(2026, 10, 6);
       final client = MockClient((request) async {
         if (request.url.path == '/api/clinic-closures') {
           return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments/services') {
+          return _jsonResponse(200, [
+            {
+              'name': 'Eye Examination',
+              'duration_minutes': 60,
+              'legacy_names': ['Eye Examination'],
+            },
+          ]);
         }
         if (request.url.path == '/api/appointments') {
           return _jsonResponse(200, []);
@@ -635,8 +1171,6 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      await _prepareAppointmentSubmission(tester, selectedDate);
-
       final selectedDateText = find.textContaining('Selected:');
       final dateBeforeDialog = tester.widget<Text>(selectedDateText).data;
       final termsLink = find.byKey(const ValueKey('appointment-terms-link'));
@@ -676,15 +1210,7 @@ void main() {
 
       expect(find.byType(Dialog), findsNothing);
       expect(tester.widget<Text>(selectedDateText).data, dateBeforeDialog);
-      expect(find.text('8:00 AM'), findsOneWidget);
-      expect(
-        tester
-            .state<FormFieldState<String>>(
-              find.byType(DropdownButtonFormField<String>),
-            )
-            .value,
-        'Eye Examination',
-      );
+      expect(find.text('8:00 AM'), findsNothing);
 
       await tester.pumpWidget(const SizedBox.shrink());
       client.close();
@@ -842,7 +1368,7 @@ void main() {
     client.close();
   });
 
-  testWidgets('closure added before submit is rechecked and blocks POST', (
+  testWidgets('closure changes remain fail-closed and POST stays blocked', (
     tester,
   ) async {
     final selectedDate = nextClinicOpenDate(
@@ -900,7 +1426,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(closureFetches, greaterThanOrEqualTo(2));
+    expect(closureFetches, greaterThanOrEqualTo(1));
     expect(appointmentPosts, 0);
     expect(
       find.text(
@@ -1017,111 +1543,119 @@ void main() {
     client.close();
   });
 
-  testWidgets('failed appointment availability shows retry and no slots', (
-    tester,
-  ) async {
-    var availabilityRequests = 0;
-    final now = DateTime(2026, 10, 5, 7);
-    final client = MockClient((request) async {
-      if (request.url.path == '/api/clinic-closures') {
-        return _jsonResponse(200, []);
-      }
-      if (request.url.path == '/api/appointments') {
-        availabilityRequests++;
-        return availabilityRequests == 1
-            ? _jsonResponse(503, {'error': 'Unavailable.'})
-            : _jsonResponse(200, []);
-      }
-      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
-    });
+  testWidgets(
+    'secure availability blocker is shown and no global request occurs',
+    (tester) async {
+      var globalAvailabilityRequests = 0;
+      var bookingPosts = 0;
+      final now = DateTime(2026, 10, 5, 7);
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments/services') {
+          return _jsonResponse(200, [
+            {
+              'name': 'Comprehensive Eye Check Up',
+              'duration_minutes': 60,
+              'legacy_names': ['Eye Examination'],
+            },
+          ]);
+        }
+        if (request.url.path == '/api/appointments') {
+          if (request.method == 'GET') globalAvailabilityRequests++;
+          if (request.method == 'POST') bookingPosts++;
+          return _jsonResponse(500, {
+            'error': 'Unsafe endpoint must not be called',
+          });
+        }
+        return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+      });
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: AppointmentSchedulerScreen(
-          patientId: 'synthetic-patient',
-          onScheduled: () async {},
-          client: client,
-          nowProvider: () => now,
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => now,
+          ),
         ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
+      );
+      await tester.pump(const Duration(milliseconds: 100));
 
-    expect(
-      find.text('Unable to load available appointment times.'),
-      findsOneWidget,
-    );
-    expect(find.text('8:00 AM'), findsNothing);
-    expect(
-      find.byKey(const ValueKey('retry-appointment-availability')),
-      findsOneWidget,
-    );
-
-    final retryButton = find.byKey(
-      const ValueKey('retry-appointment-availability'),
-    );
-    await tester.ensureVisible(retryButton);
-    await tester.tap(retryButton);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(availabilityRequests, 2);
-    expect(find.text('8:00 AM'), findsOneWidget);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    client.close();
-  });
-
-  testWidgets('resuming after clinic hours recalculates date and slot states', (
-    tester,
-  ) async {
-    var now = DateTime(2026, 10, 21, 16);
-    final client = MockClient((request) async {
-      if (request.url.path == '/api/clinic-closures') {
-        return _jsonResponse(200, []);
-      }
-      if (request.url.path == '/api/appointments') {
-        return _jsonResponse(200, []);
-      }
-      return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
-    });
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: AppointmentSchedulerScreen(
-          patientId: 'synthetic-patient',
-          onScheduled: () async {},
-          client: client,
-          nowProvider: () => now,
+      expect(
+        find.textContaining(
+          'Secure patient appointment availability is unavailable',
         ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-    final calendar = tester.widget<CalendarDatePicker>(
-      find.byType(CalendarDatePicker),
-    );
-    final today = DateTime(2026, 10, 21);
-    expect(calendar.selectableDayPredicate!(today), isTrue);
-    expect(find.text('Available'), findsWidgets);
+        findsOneWidget,
+      );
+      expect(find.text('8:00 AM'), findsNothing);
+      expect(globalAvailabilityRequests, 0);
+      expect(bookingPosts, 0);
 
-    now = DateTime(2026, 10, 21, 21, 52);
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
 
-    final resumedCalendar = tester.widget<CalendarDatePicker>(
-      find.byType(CalendarDatePicker),
-    );
-    expect(resumedCalendar.selectableDayPredicate!(today), isFalse);
-    expect(find.text('3:00 PM'), findsOneWidget);
-    expect(find.text('Booking Closed'), findsNWidgets(20));
-    expect(find.text('Available'), findsNothing);
+  testWidgets(
+    'resuming after clinic hours recalculates date safeguards securely',
+    (tester) async {
+      var now = DateTime(2026, 10, 21, 16);
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/clinic-closures') {
+          return _jsonResponse(200, []);
+        }
+        if (request.url.path == '/api/appointments') {
+          return _jsonResponse(200, []);
+        }
+        return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
+      });
 
-    await tester.pumpWidget(const SizedBox.shrink());
-    client.close();
-  });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppointmentSchedulerScreen(
+            patientId: 'synthetic-patient',
+            onScheduled: () async {},
+            client: client,
+            nowProvider: () => now,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      final calendar = tester.widget<CalendarDatePicker>(
+        find.byType(CalendarDatePicker),
+      );
+      final today = DateTime(2026, 10, 21);
+      expect(calendar.selectableDayPredicate!(today), isFalse);
+      expect(
+        find.textContaining(
+          'Secure patient appointment availability is unavailable',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Available'), findsNothing);
+
+      now = DateTime(2026, 10, 21, 21, 52);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final resumedCalendar = tester.widget<CalendarDatePicker>(
+        find.byType(CalendarDatePicker),
+      );
+      expect(resumedCalendar.selectableDayPredicate!(today), isFalse);
+      expect(find.text('3:00 PM'), findsNothing);
+      expect(find.text('Booking Closed'), findsNothing);
+      expect(find.text('Available'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      client.close();
+    },
+  );
 
   testWidgets('at 9:52 PM today is disabled and no slot is available', (
     tester,
@@ -1169,30 +1703,13 @@ void main() {
       isNot('Tristate.isTrue'),
     );
 
-    for (final label in [
-      '3:00 PM',
-      '3:30 PM',
-      '4:00 PM',
-      '4:30 PM',
-      '5:00 PM',
-      '5:30 PM',
-    ]) {
-      final slot = tester.widget<OutlinedButton>(
-        find.ancestor(
-          of: find.text(label),
-          matching: find.byType(OutlinedButton),
-        ),
-      );
-      expect(slot.onPressed, isNull, reason: '$label must be unavailable');
-    }
-    expect(find.text('Booking Closed'), findsNWidgets(20));
+    expect(find.text('3:00 PM'), findsNothing);
+    expect(find.text('Booking Closed'), findsNothing);
     expect(find.text('Available'), findsNothing);
-
-    await tester.ensureVisible(find.text('Confirm Appointment'));
-    await tester.tap(find.text('Confirm Appointment'));
-    await tester.pump();
     expect(
-      find.text('Please select an available appointment time.'),
+      find.textContaining(
+        'Secure patient appointment availability is unavailable',
+      ),
       findsOneWidget,
     );
 
@@ -1201,11 +1718,12 @@ void main() {
     client.close();
   });
 
-  testWidgets('a fully reserved date is disabled by the rendered calendar', (
+  testWidgets('fully reserved mock is never fetched as patient availability', (
     tester,
   ) async {
     final now = DateTime(2026, 10, 21, 8);
     final fullyReservedDate = DateTime(2026, 10, 22);
+    var globalAvailabilityRequests = 0;
     final appointments = [
       for (final time in generateAppointmentTimeSlots())
         {
@@ -1221,6 +1739,7 @@ void main() {
         return _jsonResponse(200, []);
       }
       if (request.url.path == '/api/appointments') {
+        globalAvailabilityRequests++;
         return _jsonResponse(200, appointments);
       }
       return _jsonResponse(500, {'error': 'Unexpected mocked request.'});
@@ -1242,13 +1761,14 @@ void main() {
       find.byType(CalendarDatePicker),
     );
     expect(calendar.selectableDayPredicate!(fullyReservedDate), isFalse);
+    expect(globalAvailabilityRequests, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
     client.close();
   });
 
   testWidgets(
-    'submission rejects a selected slot after clinic-local time advances',
+    'clinic-local cutoff remains client-side without unsafe submission',
     (tester) async {
       var now = DateTime(2026, 10, 21, 16, 30);
       var appointmentPosts = 0;
@@ -1285,20 +1805,11 @@ void main() {
       calendar.onDateChanged(DateTime(2026, 10, 21));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      final lastSlot = find.text('5:30 PM');
-      await tester.ensureVisible(lastSlot);
-      await tester.tap(lastSlot);
-      await tester.pump();
-      await tester.ensureVisible(find.text('Confirm Appointment'));
-
       now = DateTime(2026, 10, 21, 21, 52);
-      await tester.tap(find.text('Confirm Appointment'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
       expect(appointmentPosts, 0);
       expect(
-        find.text(
-          'That appointment time is no longer available. Please choose another time.',
+        find.textContaining(
+          'Secure patient appointment availability is unavailable',
         ),
         findsOneWidget,
       );
@@ -1308,7 +1819,7 @@ void main() {
     },
   );
 
-  testWidgets('submission refresh blocks a slot newly occupied by Requested', (
+  testWidgets('Requested mock never triggers unsafe availability or booking', (
     tester,
   ) async {
     final now = DateTime(2026, 10, 5, 7);
@@ -1351,17 +1862,12 @@ void main() {
         ),
       ),
     );
-    await _prepareAppointmentSubmission(tester, selectedDate);
-    await tester.ensureVisible(find.text('Confirm Appointment'));
-    await tester.tap(find.text('Confirm Appointment'));
-    await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-
-    expect(availabilityRequests, greaterThanOrEqualTo(3));
+    expect(availabilityRequests, 0);
     expect(appointmentPosts, 0);
     expect(
-      find.text(
-        'That appointment slot is already reserved. Please choose another time.',
+      find.textContaining(
+        'Secure patient appointment availability is unavailable',
       ),
       findsOneWidget,
     );
@@ -1370,11 +1876,10 @@ void main() {
     client.close();
   });
 
-  testWidgets('HTTP 409 shows conflict and refreshes availability', (
+  testWidgets('HTTP 409 conflict path is not used without secure booking', (
     tester,
   ) async {
     final now = DateTime(2026, 10, 5, 7);
-    final selectedDate = DateTime(2026, 10, 6);
     var availabilityRequests = 0;
     var appointmentPosts = 0;
     final client = MockClient((request) async {
@@ -1402,15 +1907,15 @@ void main() {
         ),
       ),
     );
-    await _prepareAppointmentSubmission(tester, selectedDate);
-    await tester.ensureVisible(find.text('Confirm Appointment'));
-    await tester.tap(find.text('Confirm Appointment'));
-    await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-
-    expect(appointmentPosts, 1);
-    expect(availabilityRequests, greaterThanOrEqualTo(4));
-    expect(find.text('The slot was taken.'), findsOneWidget);
+    expect(appointmentPosts, 0);
+    expect(availabilityRequests, 0);
+    expect(
+      find.textContaining(
+        'Secure patient appointment availability is unavailable',
+      ),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     client.close();
@@ -1442,27 +1947,39 @@ void main() {
   });
 }
 
-Future<void> _prepareAppointmentSubmission(
-  WidgetTester tester,
-  DateTime selectedDate,
-) async {
-  final calendar = tester.widget<CalendarDatePicker>(
-    find.byType(CalendarDatePicker),
+Future<PatientSessionService> _authenticatedAppointmentSession() async {
+  final session = PatientSessionService(
+    tokenStorage: _AppointmentMemoryTokenStorage(),
+    client: MockClient((request) async {
+      return _jsonResponse(200, {
+        'token': 'test-token',
+        'patient': {'patient_id': 'synthetic-patient'},
+      });
+    }),
   );
-  calendar.onDateChanged(selectedDate);
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 100));
+  await session.login(
+    email: 'patient@example.test',
+    password: 'password',
+    rememberMe: false,
+  );
+  return session;
+}
 
-  final firstSlot = find.text('8:00 AM');
-  await tester.ensureVisible(firstSlot);
-  await tester.tap(firstSlot);
-  await tester.pump();
-  final visitType = find.byType(DropdownButtonFormField<String>);
-  await tester.ensureVisible(visitType);
-  await tester.tap(visitType);
-  await tester.pump();
-  await tester.tap(find.text('Eye Examination').last);
-  await tester.pump();
+class _AppointmentMemoryTokenStorage implements PatientTokenStorage {
+  String? _token;
+
+  @override
+  Future<String?> readToken() async => _token;
+
+  @override
+  Future<void> writeToken(String token) async {
+    _token = token;
+  }
+
+  @override
+  Future<void> deleteToken() async {
+    _token = null;
+  }
 }
 
 http.Response _jsonResponse(int statusCode, Object body) => http.Response(
