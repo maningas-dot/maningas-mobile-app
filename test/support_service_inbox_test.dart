@@ -53,6 +53,7 @@ void main() {
     expect(find.text('Appointment question'), findsOneWidget);
     expect(find.text('Appointment'), findsOneWidget);
     expect(find.text('In Progress'), findsOneWidget);
+    expect(find.text('Priority: Medium'), findsOneWidget);
     expect(find.text('Fictional demo tickets'), findsNothing);
     expect(find.byKey(const ValueKey('support-tickets-loading')), findsNothing);
     expect(requests, hasLength(1));
@@ -61,6 +62,76 @@ void main() {
     expect(requests.single.url.queryParameters['limit'], '10');
     expect(requests.single.headers['Authorization'], 'Bearer test-token');
   });
+
+  testWidgets(
+    'displays backend priority values and safely hides missing priority',
+    (tester) async {
+      final priorities = ['Low', 'Medium', 'High', 'Urgent'];
+      for (final priority in priorities) {
+        final service = await _supportService(
+          (_) async => http.Response(
+            jsonEncode({
+              'success': true,
+              'items': [
+                {
+                  'ticket_id': 40,
+                  'patient_id': 'patient-7',
+                  'subject': 'Priority $priority',
+                  'category': 'General Inquiry',
+                  'priority': priority,
+                  'status': 'open',
+                  'created_at': '2026-10-28T12:00:00Z',
+                },
+              ],
+              'pagination': {
+                'page': 1,
+                'limit': 10,
+                'total': 1,
+                'totalPages': 1,
+              },
+            }),
+            200,
+          ),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SupportServiceScreen(supportCenterService: service),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Priority: $priority'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+      }
+
+      final missingService = await _supportService(
+        (_) async => http.Response(
+          jsonEncode({
+            'success': true,
+            'items': [
+              {
+                'ticket_id': 44,
+                'patient_id': 'patient-7',
+                'subject': 'Missing Priority',
+                'category': 'Other',
+                'status': 'open',
+                'created_at': '2026-10-28T12:00:00Z',
+              },
+            ],
+            'pagination': {'page': 1, 'limit': 10, 'total': 1, 'totalPages': 1},
+          }),
+          200,
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SupportServiceScreen(supportCenterService: missingService),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Missing Priority'), findsOneWidget);
+    },
+  );
 
   testWidgets('shows the existing empty-ticket state for an empty response', (
     tester,

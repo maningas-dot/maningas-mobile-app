@@ -174,6 +174,24 @@ class SupportCenterService {
     return page.tickets;
   }
 
+  Future<SupportTicket?> getMyTicketById(String ticketId) async {
+    final cleanTicketId = ticketId.trim();
+    if (cleanTicketId.isEmpty) return null;
+
+    var page = 1;
+    while (true) {
+      final result = await getMyTicketPage(page: page, limit: 10);
+      for (final ticket in result.tickets) {
+        if (ticket.ticketId == cleanTicketId) return ticket;
+      }
+      if (result.pagination.totalPages == 0 ||
+          page >= result.pagination.totalPages) {
+        return null;
+      }
+      page++;
+    }
+  }
+
   Future<SupportMessageList> getMessages(String ticketId) async {
     final response = await _getJsonMapOrList(
       '$_basePath/tickets/${Uri.encodeComponent(ticketId)}/messages',

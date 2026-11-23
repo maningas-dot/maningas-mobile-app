@@ -357,6 +357,131 @@ void main() {
     );
   });
 
+  testWidgets('refreshes a selected ticket found on a later page', (
+    tester,
+  ) async {
+    final requestedPages = <String>[];
+    var ticketListRequestCount = 0;
+    final service = await _supportService((request) async {
+      if (request.url.path.contains('/my-tickets')) {
+        ticketListRequestCount++;
+        if (ticketListRequestCount == 1) {
+          return _ticketListResponse(status: 'open');
+        }
+        final page = request.url.queryParameters['page'] ?? '1';
+        requestedPages.add(page);
+        if (page == '1') {
+          return _ticketListResponse(
+            status: 'open',
+            ticketId: 41,
+            page: 1,
+            totalPages: 2,
+            total: 11,
+          );
+        }
+        return _ticketListResponse(
+          status: 'in_progress',
+          ticketId: 77,
+          page: 2,
+          totalPages: 2,
+          total: 11,
+        );
+      }
+      if (request.method == 'GET') {
+        return http.Response(
+          jsonEncode({
+            'success': true,
+            'messages': <Object>[],
+            'chatAvailable': true,
+            'readOnly': false,
+          }),
+          200,
+        );
+      }
+      return http.Response(
+        jsonEncode({'success': true, 'updatedCount': 0}),
+        200,
+      );
+    });
+
+    await _openConversation(tester, service);
+
+    expect(requestedPages, ['1', '2']);
+    expect(
+      tester
+          .widget<TextField>(
+            find.byKey(const ValueKey('support-message-input')),
+          )
+          .enabled,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('support-message-send')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets(
+    'expired tickets are explicitly read-only and disable both inputs',
+    (tester) async {
+      final service = await _supportService((request) async {
+        if (request.url.path.contains('/my-tickets')) {
+          return _ticketListResponse(status: 'expired');
+        }
+        if (request.method == 'GET') {
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'messages': <Object>[],
+              'chatAvailable': true,
+              'readOnly': false,
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({'success': true, 'updatedCount': 0}),
+          200,
+        );
+      });
+
+      await _openConversation(tester, service);
+
+      expect(
+        find.text('This ticket has expired and can no longer receive replies.'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const ValueKey('support-message-input')),
+            )
+            .enabled,
+        isFalse,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('support-message-send')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('support-message-attach')),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
+
   testWidgets('terminal ticket statuses remain read-only after refresh', (
     tester,
   ) async {
@@ -1087,25 +1212,35 @@ Future<SupportCenterService> _supportService(
   );
 }
 
-http.Response _ticketListResponse({String status = 'in_progress'}) =>
-    http.Response(
-      jsonEncode({
-        'success': true,
-        'items': [
-          {
-            'ticket_id': 77,
-            'patient_id': 'patient-7',
-            'subject': 'Actual appointment request',
-            'category': 'Appointment',
-            'priority': 'Medium',
-            'status': status,
-            'created_at': '2026-11-10T10:00:00Z',
-          },
-        ],
-        'pagination': {'page': 1, 'limit': 10, 'total': 1, 'totalPages': 1},
-      }),
-      200,
-    );
+http.Response _ticketListResponse({
+  String status = 'in_progress',
+  int ticketId = 77,
+  int page = 1,
+  int totalPages = 1,
+  int total = 1,
+}) => http.Response(
+  jsonEncode({
+    'success': true,
+    'items': [
+      {
+        'ticket_id': ticketId,
+        'patient_id': 'patient-7',
+        'subject': 'Actual appointment request',
+        'category': 'Appointment',
+        'priority': 'Medium',
+        'status': status,
+        'created_at': '2026-11-10T10:00:00Z',
+      },
+    ],
+    'pagination': {
+      'page': page,
+      'limit': 10,
+      'total': total,
+      'totalPages': totalPages,
+    },
+  }),
+  200,
+);
 
 Map<String, dynamic> _messageJson({
   int id = 1,

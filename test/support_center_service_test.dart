@@ -284,6 +284,90 @@ void main() {
       expect(page.pagination.totalPages, 1);
     });
 
+    test('finds a selected ticket on a later bounded page', () async {
+      final session = await _authenticatedSession();
+      final requestedPages = <String>[];
+      final service = _service(
+        session,
+        MockClient((request) async {
+          expect(request.url.path, '/api/patients/support/my-tickets/page');
+          final page = request.url.queryParameters['page']!;
+          requestedPages.add(page);
+          if (page == '1') {
+            return http.Response(
+              jsonEncode({
+                'success': true,
+                'items': [
+                  {..._ticketJson(), 'ticket_id': 41},
+                ],
+                'pagination': {
+                  'page': 1,
+                  'limit': 10,
+                  'total': 11,
+                  'totalPages': 2,
+                },
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'items': [
+                {..._ticketJson(), 'ticket_id': 42, 'status': 'in_progress'},
+              ],
+              'pagination': {
+                'page': 2,
+                'limit': 10,
+                'total': 11,
+                'totalPages': 2,
+              },
+            }),
+            200,
+          );
+        }),
+      );
+
+      final ticket = await service.getMyTicketById('42');
+
+      expect(ticket, isNotNull);
+      expect(ticket!.ticketId, '42');
+      expect(ticket.status, 'in_progress');
+      expect(requestedPages, ['1', '2']);
+    });
+
+    test('stops bounded ticket lookup when ticket is absent', () async {
+      final session = await _authenticatedSession();
+      final requestedPages = <String>[];
+      final service = _service(
+        session,
+        MockClient((request) async {
+          final page = request.url.queryParameters['page']!;
+          requestedPages.add(page);
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'items': [
+                {..._ticketJson(), 'ticket_id': page == '1' ? 41 : 43},
+              ],
+              'pagination': {
+                'page': int.parse(page),
+                'limit': 10,
+                'total': 11,
+                'totalPages': 2,
+              },
+            }),
+            200,
+          );
+        }),
+      );
+
+      final ticket = await service.getMyTicketById('42');
+
+      expect(ticket, isNull);
+      expect(requestedPages, ['1', '2']);
+    });
+
     test('sends image-only and text-plus-image multipart messages', () async {
       final session = await _authenticatedSession();
       for (final scenario in [

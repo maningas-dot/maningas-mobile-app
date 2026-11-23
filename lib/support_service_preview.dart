@@ -574,6 +574,10 @@ class _TicketCard extends StatelessWidget {
       'pending',
     }.contains(normalizedStatus);
     final category = ticket.category?.trim();
+    final priority = ticket.priority?.trim();
+    final priorityLabel = priority == null || priority.isEmpty
+        ? null
+        : 'Priority: ${_formatTicketStatusLabel(priority)}';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -634,6 +638,8 @@ class _TicketCard extends StatelessWidget {
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
                             _StatusPill(status: status, isOpen: isOpen),
+                            if (priorityLabel != null)
+                              _PriorityPill(label: priorityLabel),
                             Text(
                               _formatTicketDate(ticket.createdAt),
                               style: TextStyle(
@@ -680,6 +686,10 @@ class _TicketCard extends StatelessWidget {
 String _ticketStatusLabel(String? status) {
   final value = status?.trim();
   if (value == null || value.isEmpty) return 'Unknown';
+  return _formatTicketStatusLabel(value);
+}
+
+String _formatTicketStatusLabel(String value) {
   return value
       .replaceAll('_', ' ')
       .split(RegExp(r'\s+'))
@@ -718,6 +728,32 @@ String _formatTicketDate(DateTime? date) {
   ];
   final localDate = date.toLocal();
   return '${months[localDate.month - 1]} ${localDate.day}, ${localDate.year}';
+}
+
+class _PriorityPill extends StatelessWidget {
+  final String label;
+
+  const _PriorityPill({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF2F4F7),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE1E5EA)),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Color(0xFF5F6B7A),
+          fontWeight: FontWeight.w600,
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
 }
 
 class _StatusPill extends StatelessWidget {
@@ -1169,21 +1205,24 @@ class _TicketConversationScreenState extends State<_TicketConversationScreen> {
   }
 
   Future<void> _refreshTicketStatus() async {
+    if (mounted) {
+      setState(() {
+        _isRefreshingTicketStatus = true;
+        _ticketStatusRefreshed = false;
+      });
+    }
     try {
-      final tickets = await widget.supportCenterService.getMyTickets();
+      final latestTicket = await widget.supportCenterService.getMyTicketById(
+        _ticket.ticketId,
+      );
       if (!mounted) return;
-      SupportTicket? latestTicket;
-      for (final ticket in tickets) {
-        if (ticket.ticketId == _ticket.ticketId) {
-          latestTicket = ticket;
-          break;
-        }
-      }
       setState(() {
         _isRefreshingTicketStatus = false;
         if (latestTicket != null) {
           _ticket = latestTicket;
           _ticketStatusRefreshed = true;
+        } else {
+          _ticketStatusRefreshed = false;
         }
       });
     } on SupportServiceException catch (error) {
@@ -1191,6 +1230,7 @@ class _TicketConversationScreenState extends State<_TicketConversationScreen> {
       debugPrint('Unable to refresh support ticket status: ${error.kind.name}');
       setState(() {
         _isRefreshingTicketStatus = false;
+        _ticketStatusRefreshed = false;
       });
     } catch (error, stackTrace) {
       if (!mounted) return;
@@ -1206,6 +1246,7 @@ class _TicketConversationScreenState extends State<_TicketConversationScreen> {
       );
       setState(() {
         _isRefreshingTicketStatus = false;
+        _ticketStatusRefreshed = false;
       });
     }
   }
@@ -1284,6 +1325,7 @@ class _TicketConversationScreenState extends State<_TicketConversationScreen> {
   bool get _isReadOnlyConversation {
     final status = (_ticket.status ?? '').trim().toLowerCase();
     return _readOnly == true ||
+        status == 'expired' ||
         status == 'resolved' ||
         status == 'closed' ||
         status == 'cancelled';
@@ -1305,17 +1347,21 @@ class _TicketConversationScreenState extends State<_TicketConversationScreen> {
   }
 
   String? get _conversationNotice {
+    final normalizedStatus = (_ticket.status ?? '').trim().toLowerCase();
+    if (normalizedStatus == 'expired') {
+      return 'This ticket has expired and can no longer receive replies.';
+    }
     if (_isReadOnlyConversation) return 'This conversation is read-only.';
     if (_chatAvailable == false) return 'Messaging is currently unavailable.';
     if (_isRefreshingTicketStatus) return 'Checking the latest ticket status.';
     if (!_ticketStatusRefreshed) {
       return 'Could not refresh the ticket status. Messaging is disabled.';
     }
-    final status = (_ticket.status ?? '').trim().toLowerCase().replaceAll(
+    final ticketStatus = (_ticket.status ?? '').trim().toLowerCase().replaceAll(
       '_',
       ' ',
     );
-    if (status == 'open') {
+    if (ticketStatus == 'open') {
       return 'Waiting for clinic staff to accept your ticket.';
     }
     if (!_canSendMessage && !_isLoading && _loadError == null) {
