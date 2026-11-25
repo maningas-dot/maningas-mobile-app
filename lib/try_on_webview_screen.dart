@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+
+import 'services/try_on_photo_saver.dart';
 
 class TryOnWebViewScreen extends StatefulWidget {
   final int frameId;
@@ -14,6 +17,7 @@ class TryOnWebViewScreen extends StatefulWidget {
 
 class _TryOnWebViewScreenState extends State<TryOnWebViewScreen> {
   WebViewController? _controller;
+  final TryOnPhotoGallerySaver _photoGallerySaver = TryOnPhotoGallerySaver();
 
   @override
   void initState() {
@@ -67,6 +71,47 @@ class _TryOnWebViewScreenState extends State<TryOnWebViewScreen> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: (request) async {
+            final url = request.url;
+            if (!TryOnJpegDataUrl.isSupported(url)) {
+              return NavigationDecision.navigate;
+            }
+
+            if (!mounted) {
+              return NavigationDecision.prevent;
+            }
+
+            try {
+              final savedUri = await _photoGallerySaver.saveDataUrl(url);
+              if (savedUri != null && mounted) {
+                _showPhotoMessage('Photo saved to Gallery!');
+              }
+            } on TryOnPhotoPermissionDeniedException {
+              _showPhotoMessage(
+                'Storage permission is needed to save photos on this device.',
+              );
+            } on TryOnPhotoSaveFailedException {
+              _showPhotoMessage(
+                'Could not save photo to Gallery. Please try again.',
+              );
+            } on FormatException {
+              _showPhotoMessage(
+                'Could not save photo to Gallery. Please try again.',
+              );
+            } on PlatformException catch (error) {
+              _showPhotoMessage(
+                error.code == 'WRITE_PERMISSION_DENIED'
+                    ? 'Storage permission is needed to save photos on this device.'
+                    : 'Could not save photo to Gallery. Please try again.',
+              );
+            } on MissingPluginException {
+              _showPhotoMessage(
+                'Could not save photo to Gallery. Please try again.',
+              );
+            }
+
+            return NavigationDecision.prevent;
+          },
           onPageStarted: (url) {
             debugPrint('TRY-ON PAGE STARTED: $url');
           },
@@ -135,6 +180,13 @@ class _TryOnWebViewScreenState extends State<TryOnWebViewScreen> {
     });
 
     debugPrint('✅ TRY-ON WEBVIEW INITIALIZED');
+  }
+
+  void _showPhotoMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override

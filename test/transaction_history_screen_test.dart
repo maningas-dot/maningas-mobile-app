@@ -375,6 +375,7 @@ void main() {
       expect(find.text('₱240.00'), findsOneWidget);
       expect(find.text('Total'), findsOneWidget);
       expect(find.text('₱2,240.00'), findsNWidgets(2));
+      expect(find.textContaining('Frame Promo'), findsNothing);
     });
 
     testWidgets(
@@ -414,6 +415,170 @@ void main() {
         expect(find.text('Total'), findsOneWidget);
         expect(find.text('₱4,479.10'), findsWidgets);
         expect(find.text('₱999,999.00'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'shows Frame Promo separately with its backend name percent and negative amount',
+      (tester) async {
+        final sessionService = await _loggedInSessionService();
+
+        await _runWithClient(
+          tester,
+          sessionService: sessionService,
+          patientId: 'patient-1',
+          authenticatedPatientId: 'patient-1',
+          client: MockClient((request) async {
+            return _paginatedResponse(
+              records: [
+                {
+                  'title': 'Promo Purchase',
+                  'subtotal': 1000,
+                  'discount_name': 'Senior/PWD',
+                  'discount_percent': 10,
+                  'discount_amount': 50,
+                  'frame_discount_name': 'Summer Frame Promo',
+                  'frame_discount_percent': 20,
+                  'frame_discount_amount': 300,
+                  'total_amount': 650,
+                },
+              ],
+            );
+          }),
+        );
+
+        expect(find.text('Senior/PWD (10%)'), findsOneWidget);
+        expect(find.text('₱-50.00'), findsOneWidget);
+        expect(find.text('Summer Frame Promo (20%)'), findsOneWidget);
+        expect(find.text('₱-300.00'), findsOneWidget);
+        expect(find.text('₱-350.00'), findsNothing);
+      },
+    );
+
+    testWidgets('omits Frame Promo row for missing null or empty fields', (
+      tester,
+    ) async {
+      final sessionService = await _loggedInSessionService();
+
+      await _runWithClient(
+        tester,
+        sessionService: sessionService,
+        patientId: 'patient-1',
+        authenticatedPatientId: 'patient-1',
+        client: MockClient((request) async {
+          return _paginatedResponse(
+            records: [
+              {
+                'title': 'Missing Promo Fields',
+                'subtotal': 1000,
+                'discount_name': 'Senior/PWD',
+                'discount_amount': 100,
+              },
+              {
+                'title': 'Null Promo Fields',
+                'subtotal': 1000,
+                'frame_discount_name': null,
+                'frame_discount_percent': null,
+                'frame_discount_amount': null,
+              },
+              {
+                'title': 'Empty Promo Fields',
+                'subtotal': 1000,
+                'frame_discount_name': ' ',
+                'frame_discount_percent': '',
+                'frame_discount_amount': '',
+              },
+            ],
+          );
+        }),
+      );
+
+      expect(find.text('Frame Promo'), findsNothing);
+      expect(find.textContaining('Promo (%)'), findsNothing);
+      expect(find.text('Senior/PWD'), findsOneWidget);
+      expect(find.text('₱-100.00'), findsOneWidget);
+    });
+
+    testWidgets(
+      'rejects invalid Frame Promo amounts and omits invalid percentages',
+      (tester) async {
+        final sessionService = await _loggedInSessionService();
+
+        await _runWithClient(
+          tester,
+          sessionService: sessionService,
+          patientId: 'patient-1',
+          authenticatedPatientId: 'patient-1',
+          client: MockClient((request) async {
+            return _paginatedResponse(
+              records: [
+                {
+                  'title': 'Invalid Percentage',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Frame Promo',
+                  'frame_discount_percent': 'Infinity',
+                  'frame_discount_amount': 25,
+                },
+                {
+                  'title': 'Malformed Percentage',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Malformed Percentage Promo',
+                  'frame_discount_percent': 'not-a-number',
+                  'frame_discount_amount': 40,
+                },
+                {
+                  'title': 'NaN Amount',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'NaN Promo',
+                  'frame_discount_percent': 20,
+                  'frame_discount_amount': 'NaN',
+                },
+                {
+                  'title': 'Invalid Amount',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Invalid Promo',
+                  'frame_discount_percent': 'not-a-number',
+                  'frame_discount_amount': 'not-a-number',
+                },
+                {
+                  'title': 'Zero Amount',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Zero Promo',
+                  'frame_discount_percent': 10,
+                  'frame_discount_amount': 0,
+                },
+                {
+                  'title': 'Negative Amount',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Negative Promo',
+                  'frame_discount_percent': 10,
+                  'frame_discount_amount': -5,
+                },
+                {
+                  'title': 'Invalid String Amount',
+                  'subtotal': 1000,
+                  'frame_discount_name': 'Malformed Promo',
+                  'frame_discount_percent': 'NaN',
+                  'frame_discount_amount': 'Infinity',
+                },
+              ],
+            );
+          }),
+        );
+
+        expect(find.text('Frame Promo'), findsOneWidget);
+        expect(find.text('Frame Promo (Infinity%)'), findsNothing);
+        expect(find.text('₱-25.00'), findsOneWidget);
+        expect(find.text('Malformed Percentage Promo'), findsOneWidget);
+        expect(find.text('Malformed Percentage Promo (NaN%)'), findsNothing);
+        expect(find.text('₱-40.00'), findsOneWidget);
+        expect(find.text('₱-NaN'), findsNothing);
+        expect(find.text('₱-Infinity'), findsNothing);
+        expect(find.text('NaN Promo'), findsNothing);
+        expect(find.text('Invalid Promo'), findsNothing);
+        expect(find.text('Zero Promo'), findsNothing);
+        expect(find.text('Negative Promo'), findsNothing);
+        expect(find.text('Malformed Promo'), findsNothing);
       },
     );
 

@@ -916,6 +916,12 @@ class _TransactionHistoryScreenState extends State<TransactionHistoryScreen> {
                 record.discountLabel!,
                 record.discountAmountLabel!,
               ),
+            if (record.frameDiscountLabel != null &&
+                record.frameDiscountAmountLabel != null)
+              _summaryRow(
+                record.frameDiscountLabel!,
+                record.frameDiscountAmountLabel!,
+              ),
             if (record.vatLabel != null) _summaryRow('VAT', record.vatLabel!),
             if (record.totalAmountLabel != null)
               _summaryRow('Total', record.totalAmountLabel!, isTotal: true),
@@ -1056,6 +1062,8 @@ class _TransactionRecord {
   final String? vatLabel;
   final String? discountLabel;
   final String? discountAmountLabel;
+  final String? frameDiscountLabel;
+  final String? frameDiscountAmountLabel;
   final List<_TransactionItemRecord> items;
   final String? itemsSummary;
   final String? status;
@@ -1067,6 +1075,7 @@ class _TransactionRecord {
       itemsSummary != null ||
       subtotalLabel != null ||
       discountAmountLabel != null ||
+      frameDiscountAmountLabel != null ||
       vatLabel != null ||
       totalAmountLabel != null;
 
@@ -1083,6 +1092,8 @@ class _TransactionRecord {
     required this.vatLabel,
     required this.discountLabel,
     required this.discountAmountLabel,
+    required this.frameDiscountLabel,
+    required this.frameDiscountAmountLabel,
     required this.items,
     required this.itemsSummary,
     required this.status,
@@ -1163,6 +1174,25 @@ class _TransactionRecord {
     final discountAmountLabel = discountAmount == null
         ? null
         : _formatAmount(-discountAmount);
+    final frameDiscountAmount = _parsePositiveAmount(
+      json['frame_discount_amount'],
+    );
+    final frameDiscountName = json['frame_discount_name']?.toString().trim();
+    final frameDiscountPercent = _parsePositiveAmount(
+      json['frame_discount_percent'],
+    );
+    final frameDiscountLabel = frameDiscountAmount == null
+        ? null
+        : [
+            frameDiscountName == null || frameDiscountName.isEmpty
+                ? 'Frame Promo'
+                : frameDiscountName,
+            if (frameDiscountPercent != null)
+              '(${_formatPercent(frameDiscountPercent)}%)',
+          ].join(' ');
+    final frameDiscountAmountLabel = frameDiscountAmount == null
+        ? null
+        : _formatAmount(-frameDiscountAmount);
     final rawItems = json['items'];
     final items = rawItems is List
         ? rawItems
@@ -1197,6 +1227,8 @@ class _TransactionRecord {
       vatLabel: vatLabel,
       discountLabel: discountLabel,
       discountAmountLabel: discountAmountLabel,
+      frameDiscountLabel: frameDiscountLabel,
+      frameDiscountAmountLabel: frameDiscountAmountLabel,
       items: items,
       itemsSummary: items.isEmpty ? itemsSummary : null,
       status: statusLabel == null ? null : _titleCase(statusLabel),
